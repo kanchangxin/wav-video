@@ -23,3 +23,9 @@ tools/drawthings/results/
 
 # macOS metadata
 .DS_Store
+
+# Unconfirmed character previews (approved references remain trackable)
+characters/*/draft_*.png
+characters/*/profile.json.tmp
+characters/*/upload_*
+characters/*/import_*.png

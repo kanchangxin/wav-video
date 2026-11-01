@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import BinaryIO
 
 from drawthings_cli import generate_image
 
@@ -95,7 +95,7 @@ class CharacterStore:
         raise ValueError("未知的角色视角")
 
     def generate_preview(self, profile_id: str, view: str, prompt: str,
-                         steps: int | None = None) -> dict:
+                         steps: int | None = None, reserved: bool = False) -> dict:
         if view not in VIEWS:
             raise ValueError("未知的角色视角")
         prompt = prompt.strip()
@@ -105,7 +105,7 @@ class CharacterStore:
             profile = self.get(profile_id)
             if view != "front" and profile["views"]["front"]["status"] != "approved":
                 raise ValueError("请先确认正面半身标准照")
-            if profile["generation"] and profile["generation"]["status"] == "running":
+            if not reserved and profile["generation"] and profile["generation"]["status"] in ("queued", "running"):
                 raise ValueError("该角色正在生图")
             profile["generation"] = {"view": view, "status": "running", "percent": 0, "error": ""}
             self._save(profile)
@@ -132,10 +132,77 @@ class CharacterStore:
             raise
         with self.lock:
             current = self.get(profile_id)
-            current["views"][view] = {"status": "draft", "prompt": prompt}
+            current["views"][view] = {"status": "draft", "prompt": prompt,
+                                      "width": width, "height": height, "steps": steps}
             current["generation"] = {"view": view, "status": "completed", "percent": 100, "error": ""}
             self._save(current)
             return current
+
+    def start_generation(self, profile_id: str, view: str, prompt: str,
+                         steps: int | None = None) -> dict:
+        if view not in VIEWS or not prompt.strip():
+            raise ValueError("请选择角色视角并填写提示词")
+        with self.lock:
+            profile = self.get(profile_id)
+            if view != "front" and profile["views"]["front"]["status"] != "approved":
+                raise ValueError("请先确认正面半身标准照")
+            if profile["generation"] and profile["generation"]["status"] in ("queued", "running"):
+                raise ValueError("该角色正在生图")
+            profile["generation"] = {"view": view, "status": "queued", "percent": 0, "error": ""}
+            self._save(profile)
+
+        def work() -> None:
+            try:
+                self.generate_preview(profile_id, view, prompt, steps, reserved=True)
+            except Exception:
+                pass  # generate_preview persists the error for polling clients.
+
+        threading.Thread(target=work, daemon=True).start()
+        return self.get(profile_id)
+
+    def import_image(self, profile_id: str, view: str, stream: BinaryIO, filename: str) -> dict:
+        if view not in VIEWS:
+            raise ValueError("未知的角色视角")
+        extension = Path(filename).suffix.lower()
+        if extension not in (".png", ".jpg", ".jpeg", ".webp"):
+            raise ValueError("只支持 PNG、JPEG 或 WebP 图片")
+        with self.lock:
+            profile = self.get(profile_id)
+            if view != "front" and profile["views"]["front"]["status"] != "approved":
+                raise ValueError("请先导入或确认正面半身标准照")
+            if profile["generation"] and profile["generation"]["status"] in ("queued", "running"):
+                raise ValueError("该角色正在生图")
+            folder = self._folder(profile_id)
+            source = folder / f"upload_{view}{extension}"
+            converted = folder / f"import_{view}.png"
+            try:
+                remaining = 20 * 1024 * 1024 + 1
+                with source.open("wb") as target:
+                    while remaining:
+                        chunk = stream.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        target.write(chunk)
+                        remaining -= len(chunk)
+                if remaining == 0:
+                    raise ValueError("参考图不能超过 20MB")
+                result = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source),
+                                         "-frames:v", "1", str(converted)], capture_output=True,
+                                        text=True, timeout=60)
+                if result.returncode or not converted.is_file():
+                    raise ValueError("图片文件无法读取")
+                converted.replace(folder / f"{view}.png")
+                profile["views"][view] = {"status": "approved", "prompt": "用户导入的参考图"}
+                if view == "front":
+                    for other in VIEWS[1:]:
+                        if profile["views"][other]["status"] in ("draft", "approved"):
+                            profile["views"][other]["stale_kind"] = profile["views"][other]["status"]
+                            profile["views"][other]["status"] = "stale"
+                self._save(profile)
+                return profile
+            finally:
+                source.unlink(missing_ok=True)
+                converted.unlink(missing_ok=True)
 
     def approve(self, profile_id: str, view: str) -> dict:
         if view not in VIEWS:
@@ -152,7 +219,8 @@ class CharacterStore:
             profile["views"][view]["status"] = "approved"
             if view == "front":
                 for other in VIEWS[1:]:
-                    if profile["views"][other]["status"] == "approved":
+                    if profile["views"][other]["status"] in ("draft", "approved"):
+                        profile["views"][other]["stale_kind"] = profile["views"][other]["status"]
                         profile["views"][other]["status"] = "stale"
             self._save(profile)
             return profile

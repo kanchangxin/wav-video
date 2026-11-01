@@ -21,6 +21,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from jianying_register import register_draft, registration_status
 from drawthings_cli import list_models
+from character_profiles import CharacterStore, DEFAULT_FRONT_PROMPT, VIEWS
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -48,6 +49,7 @@ class JobManager:
         self.runs = self.root / "runs"
         self.uploads.mkdir(exist_ok=True)
         self.runs.mkdir(exist_ok=True)
+        self.characters = CharacterStore(self.root)
         self.lock = threading.Lock()
         self.jobs: dict[str, dict] = {}
         self.processes: dict[str, subprocess.Popen] = {}
@@ -112,6 +114,13 @@ class JobManager:
             image_steps = number("image_steps", 20, 1, 150, True)
         else:
             image_steps = None
+        image_seed = number("image_seed", 271829, 0, 4294967295, True)
+        image_prompt_suffix = str(data.get("image_prompt_suffix") or "").strip()
+        if len(image_prompt_suffix) > 4000:
+            raise ValueError("固定提示词后缀不能超过 4000 个字符")
+        profile_id = str(data.get("character_profile_id") or "").strip()
+        if profile_id and not generate_images:
+            raise ValueError("使用角色档案需要开启 Draw Things 生图")
         max_seconds = data.get("max_seconds")
         if max_seconds not in (None, ""):
             max_seconds = number("max_seconds", 30, 1, 3600)
@@ -137,6 +146,18 @@ class JobManager:
                    "--scene-seconds", str(scene_seconds)]
         if image_steps is not None:
             command += ["--image-steps", str(image_steps)]
+        if generate_images:
+            command += ["--image-seed", str(image_seed)]
+            if image_prompt_suffix:
+                command += ["--image-prompt-suffix", image_prompt_suffix]
+            if profile_id:
+                try:
+                    profile = self.characters.get(profile_id)
+                except (KeyError, ValueError) as exc:
+                    raise ValueError("角色档案不存在") from exc
+                if profile["views"]["front"]["status"] != "approved" or not self.characters.approved_references(profile_id):
+                    raise ValueError("角色档案需要已确认的正面半身标准照")
+                command += ["--character-profile", str(self.characters._folder(profile_id)), "--review-scenes"]
         if transcript:
             command += ["--transcript-json", str(transcript_path)]
         if max_seconds is not None:
@@ -153,6 +174,8 @@ class JobManager:
                 raise ValueError(f"无法读取 Draw Things 本地模型：{exc}") from exc
             if selected_model not in available:
                 raise ValueError("请选择本机已下载的 Draw Things 模型")
+            if profile_id and selected_model != profile["model"]:
+                raise ValueError("场景生图模型须与角色档案的模型一致")
         for key, flag in (("llm_base_url", "--llm-base-url"), ("llm_model", "--llm-model"),
                           ("visual_style", "--visual-style"),
                           ("drawthings_model", "--drawthings-model"),
@@ -351,6 +374,105 @@ def create_app(project_root: Path | None = None) -> Flask:
     def index():
         return render_template("index.html")
 
+    @app.get("/characters")
+    def character_page():
+        return render_template("characters.html", front_prompt=DEFAULT_FRONT_PROMPT)
+
+    @app.get("/api/characters")
+    def list_characters():
+        return jsonify(characters=manager.characters.list())
+
+    @app.post("/api/characters")
+    def create_character():
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify(error="请提交 JSON 配置"), 400
+        try:
+            model = str(data.get("model") or "").strip()
+            available = {item["id"] for item in list_models()}
+            if model not in available:
+                raise ValueError("请选择本机已下载的 Draw Things 模型")
+            seed = int(data.get("seed", 271829))
+            profile = manager.characters.create(str(data.get("name") or ""), str(data.get("path") or ""),
+                                                model, seed, str(data.get("front_prompt") or ""))
+            return jsonify(profile), 201
+        except (TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get("/api/characters/<profile_id>")
+    def get_character(profile_id: str):
+        try:
+            profile = manager.characters.get(profile_id)
+            profile["suggested_prompts"] = {view: manager.characters.suggested_prompt(profile_id, view)
+                                            for view in VIEWS}
+            return jsonify(profile)
+        except (KeyError, ValueError):
+            return jsonify(error="角色档案不存在"), 404
+
+    @app.post("/api/characters/<profile_id>/generate")
+    def generate_character(profile_id: str):
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify(error="请提交 JSON 配置"), 400
+        try:
+            steps = data.get("steps")
+            steps = int(steps) if steps not in (None, "") else None
+            if steps is not None and not 1 <= steps <= 150:
+                raise ValueError("生图步数须在 1 到 150 之间")
+            result = manager.characters.start_generation(profile_id, str(data.get("view") or ""),
+                                                          str(data.get("prompt") or ""), steps)
+            return jsonify(result), 202
+        except KeyError:
+            return jsonify(error="角色档案不存在"), 404
+        except (TypeError, ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/characters/<profile_id>/approve")
+    def approve_character(profile_id: str):
+        try:
+            return jsonify(manager.characters.approve(profile_id, str((request.get_json(silent=True) or {}).get("view") or "")))
+        except KeyError:
+            return jsonify(error="角色档案不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/characters/<profile_id>/import")
+    def import_character_image(profile_id: str):
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            return jsonify(error="请选择图片"), 400
+        try:
+            return jsonify(manager.characters.import_image(profile_id, request.form.get("view", ""),
+                                                            uploaded.stream, uploaded.filename))
+        except KeyError:
+            return jsonify(error="角色档案不存在"), 404
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get("/api/characters/<profile_id>/image/<view>/<kind>")
+    def character_image(profile_id: str, view: str, kind: str):
+        if view not in VIEWS or kind not in ("draft", "approved"):
+            return jsonify(error="图片不存在"), 404
+        try:
+            folder = manager.characters._folder(profile_id)
+            manager.characters.get(profile_id)
+        except (KeyError, ValueError):
+            return jsonify(error="角色档案不存在"), 404
+        name = f"draft_{view}.png" if kind == "draft" else f"{view}.png"
+        if not (folder / name).is_file():
+            return jsonify(error="图片不存在"), 404
+        return send_from_directory(folder, name)
+
+    @app.post("/api/characters/<profile_id>/open")
+    def open_character(profile_id: str):
+        try:
+            manager.characters.open_folder(profile_id)
+            return jsonify(opened=True)
+        except (KeyError, ValueError):
+            return jsonify(error="角色档案不存在"), 404
+        except OSError as exc:
+            return jsonify(error=f"无法打开目录：{exc}"), 500
+
     @app.get("/api/audio")
     def audio_files():
         return jsonify(files=manager.audio_files())
@@ -400,6 +522,38 @@ def create_app(project_root: Path | None = None) -> Flask:
             return jsonify(manager.get(job_id))
         except KeyError:
             return jsonify(error="任务不存在"), 404
+
+    @app.route("/api/jobs/<job_id>/scenes", methods=["GET", "POST"])
+    def job_scenes(job_id: str):
+        try:
+            job = manager.get(job_id)
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        folder = Path(job["output_dir"])
+        draft = folder / "scenes_draft.json"
+        if not draft.is_file():
+            return jsonify(error="场景计划尚未生成"), 404
+        plan = json.loads(draft.read_text(encoding="utf-8"))
+        if request.method == "GET":
+            return jsonify(plan)
+        if job["status"] != "running" or job.get("progress", {}).get("stage") != "等待确认场景":
+            return jsonify(error="当前任务不在场景确认阶段"), 400
+        review = folder / "scene_review.json"
+        if review.exists():
+            return jsonify(error="场景计划已经确认"), 400
+        data = request.get_json(silent=True) or {}
+        items = data.get("scenes")
+        if not isinstance(items, list) or len(items) != len(plan["scenes"]):
+            return jsonify(error="场景数量不匹配"), 400
+        for item in items:
+            if (not isinstance(item, dict) or not isinstance(item.get("character_present"), bool)
+                    or not isinstance(item.get("prompt"), str) or not item["prompt"].strip()
+                    or len(item["prompt"]) > 4000):
+                return jsonify(error="请为每个场景填写提示词并选择主角是否出镜"), 400
+        temporary = folder / "scene_review.json.tmp"
+        temporary.write_text(json.dumps({"scenes": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(review)
+        return jsonify(accepted=True)
 
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id: str):

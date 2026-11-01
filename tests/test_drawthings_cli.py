@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import subprocess
 from pathlib import Path
 
 from drawthings_cli import list_models, generate_image
@@ -52,3 +53,19 @@ class DrawThingsCliTests(unittest.TestCase):
             self.assertEqual(args[args.index("--seed") + 1], "271829")
             self.assertEqual([args[i + 1] for i, value in enumerate(args) if value == "--image"],
                              [str(first), str(second)])
+
+    def test_matching_aspect_reference_is_padded_to_avoid_canvas_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "front.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.04",
+                            "-frames:v", "1", str(reference)], check=True)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DRAWTHINGS_TEST_ARGS\"\nwhile [ \"$1\" != '--output' ]; do shift; done\nprintf image > \"$2\"\n")
+            cli.chmod(0o755)
+            from unittest.mock import patch
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_ARGS": str(root / "args.txt")}):
+                generate_image("same person", root / "out.png", "flux.ckpt", 512, 512,
+                               cli=cli, references=[reference])
+            args = (root / "args.txt").read_text().splitlines()
+            self.assertNotEqual(args[args.index("--image") + 1], str(reference))

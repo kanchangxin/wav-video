@@ -59,6 +59,13 @@ def image_request_fingerprint(prompt: str, model: str, width: int, height: int,
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def image_cache_matches(metadata: Path, fingerprint: str) -> bool:
+    try:
+        return json.loads(metadata.read_text(encoding="utf-8")).get("fingerprint") == fingerprint
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def review_scenes(scenes: list[Scene], output: Path, character_name: str,
                   poll_interval: float = 0.5) -> list[Scene]:
     review_path = output / "scene_review.json"
@@ -613,8 +620,7 @@ def main(argv: list[str] | None = None) -> int:
                       "references": [str(path) for path in references], "model": args.drawthings_model,
                       "steps": args.image_steps, "fingerprint": fingerprint, "status": "pending"}
             print(f"场景 {i} 最终生图提示词：{final_prompt}\nseed：{args.image_seed}；参考图：{record['references']}", flush=True)
-            if image.is_file() and (args.images_dir is not None or
-                                    (metadata.is_file() and json.loads(metadata.read_text(encoding="utf-8")).get("fingerprint") == fingerprint)):
+            if image.is_file() and (args.images_dir is not None or image_cache_matches(metadata, fingerprint)):
                 scene.image = str(image)
                 record["status"] = "reused"
             elif args.generate_images:

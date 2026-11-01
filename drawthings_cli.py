@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
@@ -51,33 +52,58 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
         command += ["--steps", str(steps)]
     if seed is not None:
         command += ["--seed", str(seed)]
-    for reference in references or []:
+    prepared_reference = None
+    selected_references = list(references or [])
+    if selected_references:
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
+                                str(selected_references[0])], capture_output=True, text=True, timeout=10)
+        if probe.returncode == 0:
+            try:
+                reference_width, reference_height = map(int, probe.stdout.strip().split("x"))
+            except ValueError:
+                reference_width = reference_height = 0
+            output_width = max(64, round(width / 64) * 64)
+            output_height = max(64, round(height / 64) * 64)
+            if reference_width and reference_height and reference_width * output_height == reference_height * output_width:
+                with tempfile.NamedTemporaryFile(prefix="character_reference_", suffix=".png",
+                                                  dir=path.parent, delete=False) as temporary:
+                    prepared_reference = Path(temporary.name)
+                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(selected_references[0]),
+                                "-vf", "pad=iw:ih+64:0:32:color=white", "-frames:v", "1",
+                                str(prepared_reference)], capture_output=True, text=True, check=True, timeout=60)
+                selected_references[0] = prepared_reference
+    for reference in selected_references:
         if not reference.is_file():
             raise FileNotFoundError(f"参考图不存在：{reference}")
         command += ["--image", str(reference)]
     recent = []
     last_percent = -1
     timed_out = threading.Event()
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, bufsize=1) as process:
-        def stop() -> None:
-            timed_out.set()
-            process.kill()
-        timer = threading.Timer(1800, stop)
-        timer.start()
-        try:
-            for line in process.stdout:
-                recent.append(line.strip())
-                recent = recent[-15:]
-                match = re.search(r"(\d{1,3})\s*%", line)
-                if match and progress:
-                    current = min(100, int(match.group(1)))
-                    if current > last_percent:
-                        last_percent = current
-                        progress(current)
-            exit_code = process.wait()
-        finally:
-            timer.cancel()
+    try:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, bufsize=1) as process:
+            def stop() -> None:
+                timed_out.set()
+                process.kill()
+            timer = threading.Timer(1800, stop)
+            timer.start()
+            try:
+                for line in process.stdout:
+                    recent.append(line.strip())
+                    recent = recent[-15:]
+                    match = re.search(r"(\d{1,3})\s*%", line)
+                    if match and progress:
+                        current = min(100, int(match.group(1)))
+                        if current > last_percent:
+                            last_percent = current
+                            progress(current)
+                exit_code = process.wait()
+            finally:
+                timer.cancel()
+    finally:
+        if prepared_reference:
+            prepared_reference.unlink(missing_ok=True)
     if timed_out.is_set():
         raise RuntimeError("Draw Things CLI 生图超时")
     if exit_code != 0:

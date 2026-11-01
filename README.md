@@ -70,6 +70,14 @@ uv run python audio_video.py "信使高欢的逆袭.m4a" \
 
 `tools/drawthings/draw-things-cli` 是本机安装的 277MB 可执行文件，不纳入 GitHub；模型、输入音频和生成结果也属于本地资产。重新克隆项目后，请按 [Draw Things CLI 说明](https://github.com/drawthingsai/draw-things-community#quick-start-with-draw-things-cli-on-macos) 安装 CLI，或将可执行文件放回该路径，程序代码和配置即可恢复。
 
+### 单主角角色基准图
+
+勾选“调用 Draw Things 为场景生图”后，可以选择已确认的角色档案，设定固定 seed（默认 `271829`）和生图提示词固定后缀；三项设置彼此独立。点击“配置基准图”进入角色页面，创建档案并修改存储路径（限项目 `characters/` 下的单独目录）。页面提供可修改的正面半身照提示词案例；生成预览并确认正面照后，可分别以它为参考生成 3/4 侧脸照和全身照。三个视角都可以单独重做，也可以导入 PNG、JPEG、WebP 图片，只有确认过的图片会进入场景生图。更新正面照后，已有的侧脸和全身照会标为过期，需重新确认或生成。
+
+选择档案后，页面自动选用创建档案时使用的 Draw Things 模型；第一版要求场景生图与角色基准图使用同一模型。任务会在场景分析后暂停，页面列出每段时间、提示词和“主角在画面中”勾选框。确认后继续生图；未勾选的场景不会传入角色图和身份提示词。每次运行会将已确认参考图复制到任务输出的 `character_reference/`，并在 `image_generation.json` 和运行日志里保存最终提示词、seed、模型、参考图和生成状态。图片复用会检查这些参数及参考图内容；改变任一项就重新生图。Draw Things CLI 在第一张参考图与输出画幅相同时会将其视作待编辑画布，程序会给参考图加边框使它保持参考图用途。
+
+命令行可用 `--character-profile characters/角色目录 --image-seed 271829 --image-prompt-suffix "cinematic realism"`。`--review-scenes` 会等待页面写入场景确认结果，建议仅从网页任务使用。固定 seed 和参考图只能提高角色相似度，不能保证所有镜头完全一致。
+
 也可自行放入图片，然后使用 `--images-dir 图片目录 --scene-mode fixed`；按 `scene_001.png`、`scene_002.png` 顺序命名，缺少的场景自动变黑。
 
 ## 剪映草稿

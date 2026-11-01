@@ -31,6 +31,123 @@ class WebAppTests(unittest.TestCase):
         audio = self.client.get("/api/audio").get_json()["files"]
         self.assertIn({"id": "root:中文旁白.m4a", "name": "中文旁白.m4a"}, audio)
 
+    def test_character_page_and_profile_creation(self):
+        self.assertEqual(self.client.get("/characters").status_code, 200)
+        with patch("web_app.list_models", return_value=[{"id": "flux.ckpt", "name": "FLUX"}]):
+            created = self.client.post("/api/characters", json={
+                "name": "高欢", "path": "characters/gaohuan", "model": "flux.ckpt",
+                "seed": 271829, "front_prompt": "portrait of a general",
+            })
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        self.assertEqual(created.get_json()["name"], "高欢")
+        detail = self.client.get("/api/characters/gaohuan").get_json()
+        self.assertIn("高欢", detail["suggested_prompts"]["three_quarter"])
+        self.assertEqual(len(self.client.get("/api/characters").get_json()["characters"]), 1)
+        self.assertEqual(self.client.post("/api/characters", json={
+            "name": "escape", "path": "../escape", "model": "flux.ckpt", "front_prompt": "portrait",
+        }).status_code, 400)
+        with patch("web_app.list_models", return_value=[{"id": "flux.ckpt", "name": "FLUX"}]):
+            invalid_seed = self.client.post("/api/characters", json={
+                "name": "invalid", "path": "characters/invalid", "model": "flux.ckpt",
+                "seed": None, "front_prompt": "portrait",
+            })
+        self.assertEqual(invalid_seed.status_code, 400)
+        self.assertEqual(invalid_seed.mimetype, "application/json")
+
+    def test_character_generation_requires_front_approval_and_serves_preview(self):
+        with patch("web_app.list_models", return_value=[{"id": "flux.ckpt", "name": "FLUX"},
+                                                         {"id": "z_image.ckpt", "name": "Z Image"}]):
+            profile = self.client.post("/api/characters", json={
+                "name": "高欢", "path": "characters/gaohuan", "model": "flux.ckpt", "front_prompt": "portrait",
+            }).get_json()
+        profile_id = profile["id"]
+        side = self.client.post(f"/api/characters/{profile_id}/generate", json={"view": "three_quarter", "prompt": "side"})
+        self.assertEqual(side.status_code, 400)
+        def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+            path.write_bytes(b"preview image")
+        with patch("character_profiles.generate_image", side_effect=fake_generate):
+            started = self.client.post(f"/api/characters/{profile_id}/generate", json={"view": "front", "prompt": "portrait"})
+            self.assertEqual(started.status_code, 202, started.get_data(as_text=True))
+            for _ in range(100):
+                state = self.client.get(f"/api/characters/{profile_id}").get_json()
+                if state["views"]["front"]["status"] == "draft":
+                    break
+                time.sleep(0.01)
+        self.assertEqual(state["views"]["front"]["status"], "draft")
+        preview = self.client.get(f"/api/characters/{profile_id}/image/front/draft")
+        self.assertEqual(preview.data, b"preview image")
+        preview.close()
+        approved = self.client.post(f"/api/characters/{profile_id}/approve", json={"view": "front"})
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.get_json()["views"]["front"]["status"], "approved")
+
+    def test_import_existing_png_rejects_invalid_image(self):
+        with patch("web_app.list_models", return_value=[{"id": "flux.ckpt", "name": "FLUX"}]):
+            profile = self.client.post("/api/characters", json={
+                "name": "高欢", "path": "characters/gaohuan", "model": "flux.ckpt", "front_prompt": "portrait",
+            }).get_json()
+        profile_id = profile["id"]
+        invalid = self.client.post(f"/api/characters/{profile_id}/import",
+                                   data={"view": "front", "file": (io.BytesIO(b"not an image"), "bad.png")},
+                                   content_type="multipart/form-data")
+        self.assertEqual(invalid.status_code, 400)
+        source = self.root / "valid.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.04",
+                        "-frames:v", "1", str(source)], check=True)
+        imported = self.client.post(f"/api/characters/{profile_id}/import",
+                                    data={"view": "front", "file": (io.BytesIO(source.read_bytes()), "front.png")},
+                                    content_type="multipart/form-data")
+        self.assertEqual(imported.status_code, 200, imported.get_data(as_text=True))
+        self.assertEqual(imported.get_json()["views"]["front"]["status"], "approved")
+
+    def test_job_command_passes_character_profile_seed_and_suffix(self):
+        with patch("web_app.list_models", return_value=[{"id": "flux.ckpt", "name": "FLUX"},
+                                                         {"id": "z_image.ckpt", "name": "Z Image"}]):
+            profile = self.client.post("/api/characters", json={
+                "name": "高欢", "path": "characters/gaohuan", "model": "flux.ckpt", "front_prompt": "portrait",
+            }).get_json()
+            folder = self.root / "characters" / profile["id"]
+            (folder / "front.png").write_bytes(b"approved")
+            manifest = json.loads((folder / "profile.json").read_text())
+            manifest["views"]["front"]["status"] = "approved"
+            (folder / "profile.json").write_text(json.dumps(manifest))
+            manager = self.app.extensions["job_manager"]
+            command, _, _ = manager._command({
+                "audio_id": "root:中文旁白.m4a", "output": "assets", "scene_mode": "fixed",
+                "generate_images": True, "drawthings_model": "flux.ckpt",
+                "character_profile_id": profile["id"], "image_seed": 271829,
+                "image_prompt_suffix": "cinematic light",
+            }, self.root / "runs" / "character-test")
+            with self.assertRaisesRegex(ValueError, "模型"):
+                manager._command({
+                    "audio_id": "root:中文旁白.m4a", "output": "assets", "scene_mode": "fixed",
+                    "generate_images": True, "drawthings_model": "z_image.ckpt",
+                    "character_profile_id": profile["id"],
+                }, self.root / "runs" / "character-test")
+        self.assertIn("--review-scenes", command)
+        self.assertEqual(command[command.index("--character-profile") + 1], str(folder.resolve()))
+        self.assertEqual(command[command.index("--image-seed") + 1], "271829")
+        self.assertEqual(command[command.index("--image-prompt-suffix") + 1], "cinematic light")
+
+    def test_scene_review_endpoint_validates_and_writes_decision(self):
+        manager = self.app.extensions["job_manager"]
+        job_id = "scene-review"
+        folder = manager.runs / job_id
+        folder.mkdir()
+        manager.jobs[job_id] = {"id": job_id, "status": "running", "created_at": "2026-01-01T00:00:00+00:00"}
+        (folder / "progress.json").write_text(json.dumps({"stage": "等待确认场景", "percent": 64}))
+        (folder / "scenes_draft.json").write_text(json.dumps({"character_name": "高欢", "scenes": [
+            {"start": 0, "end": 1, "prompt": "city", "character_present": True},
+        ]}))
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}/scenes").get_json()["scenes"][0]["prompt"], "city")
+        invalid = self.client.post(f"/api/jobs/{job_id}/scenes", json={"scenes": [{"prompt": "", "character_present": True}]})
+        self.assertEqual(invalid.status_code, 400)
+        accepted = self.client.post(f"/api/jobs/{job_id}/scenes", json={"scenes": [
+            {"prompt": "hero in city", "character_present": False},
+        ]})
+        self.assertEqual(accepted.status_code, 200)
+        self.assertFalse(json.loads((folder / "scene_review.json").read_text())["scenes"][0]["character_present"])
+
     def test_job_command_passes_global_visual_style(self):
         manager = self.app.extensions["job_manager"]
         command, _, _ = manager._command({

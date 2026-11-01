@@ -35,6 +35,23 @@ class CharacterStoreTests(unittest.TestCase):
         self.assertEqual(calls[1][3], [self.root.resolve() / "characters/gaohuan/front.png"])
         self.assertEqual(calls[1][2], 271829)
         self.assertEqual(self.store.get(profile["id"])["views"]["front"]["status"], "approved")
+        self.assertEqual(self.store.get(profile["id"])["views"]["front"]["width"], 768)
+        self.assertEqual(self.store.get(profile["id"])["views"]["front"]["height"], 1024)
+
+    def test_replacing_front_invalidates_older_side_draft(self):
+        profile = self.store.create("高欢", "characters/gaohuan", "flux.ckpt", 271829, "portrait")
+        def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+            path.write_bytes(b"image")
+        with patch("character_profiles.generate_image", side_effect=fake_generate):
+            self.store.generate_preview(profile["id"], "front", "first")
+            self.store.approve(profile["id"], "front")
+            self.store.generate_preview(profile["id"], "three_quarter", "side")
+            self.store.generate_preview(profile["id"], "front", "revised")
+            self.store.approve(profile["id"], "front")
+        self.assertEqual(self.store.get(profile["id"])["views"]["three_quarter"]["status"], "stale")
+        self.assertEqual(self.store.get(profile["id"])["views"]["three_quarter"]["stale_kind"], "draft")
+        with self.assertRaises(ValueError):
+            self.store.approve(profile["id"], "three_quarter")
 
 
 if __name__ == "__main__":

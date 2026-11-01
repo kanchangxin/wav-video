@@ -31,22 +31,22 @@
 
 **Files:** `drawthings_cli.py`、`character_profiles.py`、`tests/test_drawthings_cli.py`、`tests/test_character_profiles.py`
 
-- [ ] 写测试并确认失败：seed、多参考图顺序、模型能力和档案路径/审批状态。
-- [ ] 实现 CLI 参数与角色档案管理。
-- [ ] 运行相关测试并提交。
+- [x] 写测试并确认失败：seed、多参考图顺序、模型能力和档案路径/审批状态。
+- [x] 实现 CLI 参数与角色档案管理。
+- [x] 运行相关测试并提交。
 
 ### Task 2: 场景生图与确认
 
 **Files:** `audio_video.py`、`tests/test_pipeline.py`
 
-- [ ] 写测试并确认失败：场景出镜、最终提示词、快照、指纹失效。
-- [ ] 实现场景确认文件和生图参数传递。
-- [ ] 运行相关测试并提交。
+- [x] 写测试并确认失败：场景出镜、最终提示词、快照、指纹失效。
+- [x] 实现场景确认文件和生图参数传递。
+- [x] 运行相关测试并提交。
 
 ### Task 3: Flask API 与页面
 
 **Files:** `web_app.py`、`templates/index.html`、`templates/characters.html`、`tests/test_web_app.py`
 
-- [ ] 写测试并确认失败：角色创建/生成/确认/导入/预览、任务参数与场景确认。
-- [ ] 实现 API、角色页面和主页面入口。
-- [ ] 运行全套测试、手动检查页面和文档，并提交。
+- [x] 写测试并确认失败：角色创建/生成/确认/导入/预览、任务参数与场景确认。
+- [x] 实现 API、角色页面和主页面入口。
+- [x] 运行全套测试、手动检查页面和文档，并提交。

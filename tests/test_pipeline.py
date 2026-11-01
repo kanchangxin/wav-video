@@ -125,6 +125,10 @@ class TimelineTests(unittest.TestCase):
             self.assertEqual((output / "images/scene_001.png").read_bytes(), b"271830")
             metadata = json.loads((output / "images/scene_001.request.json").read_text())
             self.assertEqual(metadata["status"], "generated")
+            (output / "images/scene_001.request.json").write_text("{broken")
+            with patch("audio_video.generate_image", side_effect=fake_generate):
+                self.assertEqual(main(base + ["--image-seed", "271830"]), 0)
+            self.assertEqual(calls, [271829, 271830, 271830])
 
     def test_incomplete_whisper_model_fails_with_actionable_error(self):
         with patch("audio_video.download_whisper_model", side_effect=RuntimeError("model.bin incomplete")):
