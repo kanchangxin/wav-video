@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from drawthings_cli import generate_image
+from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for
 
 
 @dataclass
@@ -36,6 +37,10 @@ class Scene:
     prompt: str
     image: str | None = None
     character_present: bool = False
+    motion: str = "static"
+    background: str | None = None
+    foreground: str | None = None
+    motion_reason: str = ""
 
 
 def compose_scene_prompt(prompt: str, suffix: str, character_name: str,
@@ -64,6 +69,16 @@ def image_cache_matches(metadata: Path, fingerprint: str) -> bool:
         return json.loads(metadata.read_text(encoding="utf-8")).get("fingerprint") == fingerprint
     except (OSError, ValueError, AttributeError):
         return False
+
+
+def validate_foreground(path: Path) -> None:
+    """Reject almost empty or opaque masks before using a cutout as a layer."""
+    result = run(["ffmpeg", "-v", "error", "-i", str(path), "-vf",
+                  "alphaextract,signalstats,metadata=print:file=-", "-frames:v", "1", "-f", "null", "-"],
+                 capture_output=True, text=True)
+    match = re.search(r"lavfi\.signalstats\.YAVG=([\d.]+)", result.stdout)
+    if not match or not 3 <= float(match.group(1)) <= 220:
+        raise RuntimeError("人物抠图透明度异常，可能未识别出完整人物")
 
 
 def review_scenes(scenes: list[Scene], output: Path, character_name: str,
@@ -404,6 +419,73 @@ def analyze_scenes(captions: list[Caption], duration: float, base_url: str, mode
     return all_scenes
 
 
+def recommend_scene_motions(scenes: list[Scene], base_url: str, model: str, api_key: str | None,
+                            captions: list[Caption] | None = None, visual_style: str = "",
+                            trace: Callable[[str], None] | None = None) -> None:
+    """Ask the LLM to choose one editable camera move per scene in bounded batches."""
+    if not model:
+        raise ValueError("自动运镜需要 --llm-model")
+    endpoint = base_url.rstrip("/") + "/chat/completions"
+    instruction = (
+        "你是视频分镜师。为每个场景选择且只选择一种镜头运动。"
+        "可选 preset：static（静止，空白/无图片或安静停顿）、push_in（推近，聚焦、紧张）、"
+        "pull_out（拉远，揭示环境或疏离）、pan_left（向左平移，向左探索）、"
+        "pan_right（向右平移，向右探索）。根据画面内容和旁白意图选择，不要轮换或组合。"
+        "左右平移仅在画面具备宽阔空间时使用；特写优先推近或静止。"
+        '只返回 JSON：{"motions":[{"index":0,"preset":"push_in","reason":"简短中文理由"}]}。'
+        "motions 必须与输入场景一一对应、index 从 0 连续递增。"
+    )
+    if visual_style.strip():
+        instruction += "\n全局画面设定：" + visual_style.strip()[:1000]
+    for batch_number, start in enumerate(range(0, len(scenes), 12), 1):
+        batch = scenes[start:start + 12]
+        entries = []
+        for index, scene in enumerate(batch):
+            spoken = "".join(c.text for c in captions or [] if scene.start <= c.start < scene.end)
+            entries.append({"index": index, "start": round(scene.start, 2), "end": round(scene.end, 2),
+                            "visual_prompt": scene.prompt[:500], "narration": spoken[:350]})
+        user_content = json.dumps(entries, ensure_ascii=False)
+        error = ""
+        for attempt in range(2):
+            system_content = instruction + (f"\n上次结果不合格：{error}。请完整重写本批结果。" if attempt else "")
+            payload = {"model": model, "temperature": 0.2, "messages": [
+                {"role": "system", "content": system_content}, {"role": "user", "content": user_content}]}
+            if trace:
+                trace(f"=== 第 {batch_number} 批自动运镜输入（第 {attempt + 1} 次）===\n"
+                      f"系统提示词：\n{system_content}\n场景：\n{user_content}\n")
+            data = post_json(endpoint, payload, api_key, timeout=180)
+            content = data["choices"][0]["message"]["content"]
+            if trace:
+                trace(f"=== 第 {batch_number} 批自动运镜输出 ===\n{content}\n")
+            try:
+                cleaned = re.sub(r"<think>.*?</think>", "", content.strip(), flags=re.S | re.I).strip()
+                if cleaned.startswith("```"):
+                    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I)
+                items = json.loads(cleaned)["motions"]
+                if not isinstance(items, list) or len(items) != len(batch):
+                    raise ValueError("运镜数量与场景数量不一致")
+                for index, item in enumerate(items):
+                    if not isinstance(item, dict) or item.get("index") != index or item.get("preset") not in LLM_PRESETS:
+                        raise ValueError(f"第 {index + 1} 段运镜无效")
+                for scene, item in zip(batch, items):
+                    scene.motion = item["preset"]
+                    scene.motion_reason = str(item.get("reason") or "")[:200]
+                break
+            except (ValueError, KeyError, TypeError, IndexError) as exc:
+                error = str(exc)
+                if trace:
+                    trace(f"第 {batch_number} 批自动运镜校验失败：{error}\n")
+        else:
+            for scene in batch:
+                scene.motion = "static"
+                scene.motion_reason = "模型输出无效，改用静止镜头"
+            if trace:
+                trace(f"第 {batch_number} 批自动运镜两次输出无效，全部改用静止镜头。\n")
+        for index, scene in enumerate(batch, start + 1):
+            if trace:
+                trace(f"场景 {index} 运镜：{scene.motion}；原因：{scene.motion_reason}\n")
+
+
 def write_progress(output: Path, stage: str, percent: int | None) -> None:
     """Publish progress atomically for the web UI."""
     temp = output / "progress.json.tmp"
@@ -430,6 +512,66 @@ def prepare_images(scenes: list[Scene], output: Path, width: int, height: int) -
     return result
 
 
+def prepare_foregrounds(scenes: list[Scene], output: Path, width: int, height: int) -> list[Path | None]:
+    output.mkdir(parents=True, exist_ok=True)
+    result = []
+    for i, scene in enumerate(scenes):
+        if scene.motion != "parallax" or not scene.foreground or not Path(scene.foreground).is_file():
+            result.append(None)
+            continue
+        normalized = output / f"foreground_{i:03}.png"
+        run(["ffmpeg", "-y", "-v", "error", "-i", str(Path(scene.foreground).resolve()), "-vf",
+             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba",
+             "-frames:v", "1", str(normalized)])
+        result.append(normalized)
+    return result
+
+
+def prepare_motion_backgrounds(scenes: list[Scene], output: Path, width: int, height: int) -> list[Path]:
+    output.mkdir(parents=True, exist_ok=True)
+    black = output / "black.png"
+    run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+         f"color=c=black:s={width}x{height}:d=0.04", "-frames:v", "1", str(black)])
+    result = []
+    for i, scene in enumerate(scenes):
+        source = scene.background or scene.image
+        if not source or not Path(source).is_file():
+            result.append(black)
+            continue
+        canvas_width, canvas_height = generation_size(width, height, scene.motion)
+        normalized = output / f"background_{i:03}.png"
+        run(["ffmpeg", "-y", "-v", "error", "-i", str(Path(source).resolve()), "-vf",
+             f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=increase,"
+             f"crop={canvas_width}:{canvas_height},setsar=1", "-frames:v", "1", str(normalized)])
+        result.append(normalized)
+    return result
+
+
+def render_motion_clip(image: Path, foreground: Path | None, scene: Scene, output: Path,
+                       width: int, height: int, fps: int, frame_count: int) -> None:
+    """Render one scene from the same linear keyframes used by the draft."""
+    end_frame = max(1, frame_count - 1)
+    motion = motion_for(scene.motion)
+    progress = f"on/{end_frame}"
+    zoom = f"({motion.scale_start}+({motion.scale_end - motion.scale_start})*{progress})"
+    x_position = f"({motion.x_start}+({motion.x_end - motion.x_start})*{progress})"
+    crop_x = f"(iw-iw/zoom)/2-({x_position})*iw/zoom"
+    filter_graph = (f"[0:v]zoompan=z='{zoom}':x='{crop_x}':y='(ih-ih/zoom)/2':"
+                    f"d=1:s={width}x{height}:fps={fps},format=yuv420p[background]")
+    command = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-i", str(image)]
+    last_label = "background"
+    if foreground is not None:
+        command += ["-loop", "1", "-framerate", str(fps), "-i", str(foreground)]
+        fg_x = (f"{width}*({motion.foreground_x_start}+"
+                f"({motion.foreground_x_end - motion.foreground_x_start})*n/{end_frame})")
+        filter_graph += f";[1:v]format=rgba[person];[background][person]overlay=x='{fg_x}':y=0:eval=frame:format=auto[composed]"
+        last_label = "composed"
+    command += ["-filter_complex", filter_graph, "-map", f"[{last_label}]", "-frames:v", str(frame_count),
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output)]
+    run(command)
+
+
 def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width: int, height: int, fps: int,
                progress: Callable[[float], None] | None = None) -> None:
     if not scenes:
@@ -437,12 +579,27 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="avrender-") as tmp:
         work = Path(tmp)
-        images = prepare_images(scenes, work / "images", width, height)
+        if any(scene.motion != "static" for scene in scenes):
+            backgrounds = prepare_motion_backgrounds(scenes, work / "images", width, height)
+            foregrounds = prepare_foregrounds(scenes, work / "foregrounds", width, height)
+            images = []
+            for i, (scene, background, foreground) in enumerate(zip(scenes, backgrounds, foregrounds)):
+                clip = work / f"motion_{i:03}.mp4"
+                frame_count = max(1, round(scene.end * fps) - round(scene.start * fps))
+                render_motion_clip(background, foreground, scene, clip, width, height, fps, frame_count)
+                images.append(clip)
+                if progress:
+                    progress(0.8 * (i + 1) / len(scenes))
+        else:
+            images = prepare_images(scenes, work / "images", width, height)
         concat = work / "frames.ffconcat"
         lines = ["ffconcat version 1.0"]
-        for scene, image in zip(scenes, images):
-            lines += [f"file '{_ffconcat_path(image)}'", f"duration {scene.end - scene.start:.6f}"]
-        lines.append(f"file '{_ffconcat_path(images[-1])}'")
+        if any(scene.motion != "static" for scene in scenes):
+            lines += [f"file '{_ffconcat_path(image)}'" for image in images]
+        else:
+            for scene, image in zip(scenes, images):
+                lines += [f"file '{_ffconcat_path(image)}'", f"duration {scene.end - scene.start:.6f}"]
+            lines.append(f"file '{_ffconcat_path(images[-1])}'")
         concat.write_text("\n".join(lines) + "\n", encoding="utf-8")
         shutil.copyfile(srt, work / "captions.srt")
         command = ["ffmpeg", "-y", "-v", "error", "-safe", "0", "-f", "concat", "-i", str(concat), "-i", str(audio.resolve()),
@@ -460,7 +617,9 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
                     recent = recent[-12:]
                     if line.startswith("out_time_us="):
                         try:
-                            progress(min(1.0, float(line.split("=", 1)[1]) / 1_000_000 / scenes[-1].end))
+                            progress(0.8 + 0.2 * min(1.0, float(line.split("=", 1)[1]) / 1_000_000 / scenes[-1].end)
+                                     if any(scene.motion != "static" for scene in scenes) else
+                                     min(1.0, float(line.split("=", 1)[1]) / 1_000_000 / scenes[-1].end))
                         except ValueError:
                             pass
                     elif line.startswith("progress=end"):
@@ -483,10 +642,32 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
     audio_copy = media / audio.name
     if audio.resolve() != audio_copy.resolve():
         shutil.copy2(audio, audio_copy)
-    prepared = prepare_images(scenes, media / "prepared", width, height)
-    script.append_tracks([draft.TrackSpec(draft.TrackType.video, "visual"), draft.TrackSpec(draft.TrackType.audio, "narration")])
-    for scene, image in zip(scenes, prepared):
-        script.add_segment(draft.VideoSegment(str(image), draft.trange_seconds(scene.start, end=scene.end)), track="visual")
+    moving = any(scene.motion != "static" for scene in scenes)
+    prepared = (prepare_motion_backgrounds(scenes, media / "prepared", width, height) if moving else
+                prepare_images(scenes, media / "prepared", width, height))
+    foregrounds = prepare_foregrounds(scenes, media / "foregrounds", width, height) if moving else [None] * len(scenes)
+    tracks = [draft.TrackSpec(draft.TrackType.video, "visual")]
+    if any(foreground is not None for foreground in foregrounds):
+        tracks.append(draft.TrackSpec(draft.TrackType.video, "foreground"))
+    tracks.append(draft.TrackSpec(draft.TrackType.audio, "narration"))
+    script.append_tracks(tracks)
+    for scene, image, foreground in zip(scenes, prepared, foregrounds):
+        segment = draft.VideoSegment(str(image), draft.trange_seconds(scene.start, end=scene.end))
+        if scene.motion != "static":
+            motion = motion_for(scene.motion)
+            end_us = round((scene.end - scene.start) * 1_000_000)
+            for offset, scale, x in ((0, motion.scale_start, motion.x_start),
+                                     (end_us, motion.scale_end, motion.x_end)):
+                segment.add_keyframe(draft.KeyframeProperty.uniform_scale, offset, scale)
+                segment.add_keyframe(draft.KeyframeProperty.position_x, offset, x)
+        script.add_segment(segment, track="visual")
+        if foreground is not None:
+            person = draft.VideoSegment(str(foreground), draft.trange_seconds(scene.start, end=scene.end))
+            motion = motion_for(scene.motion)
+            end_us = round((scene.end - scene.start) * 1_000_000)
+            person.add_keyframe(draft.KeyframeProperty.position_x, 0, motion.foreground_x_start)
+            person.add_keyframe(draft.KeyframeProperty.position_x, end_us, motion.foreground_x_end)
+            script.add_segment(person, track="foreground")
     audio_material = draft.AudioMaterial(str(audio_copy))
     audio_end_us = min(round(scenes[-1].end * 1_000_000), audio_material.duration)
     script.add_segment(draft.AudioSegment(audio_material, draft.Timerange(0, audio_end_us)), track="narration")
@@ -506,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--language", default="zh", help="识别语言，空字符串为自动识别")
     parser.add_argument("--scene-mode", choices=["none", "fixed", "llm"], default="none")
     parser.add_argument("--scene-seconds", type=float, default=25.0)
+    parser.add_argument("--motion-preset", choices=sorted(PRESETS), default="static",
+                        help="镜头动效：静止、大模型逐场景推荐、推拉、平移或分层视差")
     parser.add_argument("--visual-style", default=os.getenv("VISUAL_STYLE", ""), help="LLM 场景分析使用的全局画面设定")
     parser.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"))
     parser.add_argument("--llm-model", default=os.getenv("LLM_MODEL", ""))
@@ -542,6 +725,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("场景确认需要选择角色档案")
         if args.generate_images and args.scene_mode == "none":
             raise ValueError("生图需要 --scene-mode fixed 或 llm")
+        if args.motion_preset == "parallax" and (not args.generate_images or not args.character_profile):
+            raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
+        if args.motion_preset == "auto" and not args.llm_model:
+            raise ValueError("自动运镜需要 --llm-model")
         if args.register_jianying and args.output not in ("jianying", "both"):
             raise ValueError("注册剪映需要 --output jianying 或 both")
         if args.register_jianying:
@@ -576,11 +763,8 @@ def main(argv: list[str] | None = None) -> int:
         write_srt(captions, srt)
         (output / "transcript.txt").write_text("".join(c.text for c in captions), encoding="utf-8")
         write_progress(output, "分析场景", 64)
-        if args.scene_mode == "none":
-            scenes = [Scene(0, duration, "")]
-        elif args.scene_mode == "fixed":
-            scenes = build_scenes(captions, duration, args.scene_seconds)
-        else:
+        record_llm_trace = None
+        if args.scene_mode == "llm" or args.motion_preset == "auto":
             trace_path = output / "llm_trace.log"
             trace_path.write_text("", encoding="utf-8")
 
@@ -590,7 +774,11 @@ def main(argv: list[str] | None = None) -> int:
                     if not message.endswith("\n"):
                         trace_file.write("\n")
                 print(message, end="" if message.endswith("\n") else "\n", flush=True)
-
+        if args.scene_mode == "none":
+            scenes = [Scene(0, duration, "")]
+        elif args.scene_mode == "fixed":
+            scenes = build_scenes(captions, duration, args.scene_seconds)
+        else:
             scenes = analyze_scenes(captions, duration, args.llm_base_url, args.llm_model, args.llm_api_key,
                                     visual_style=args.visual_style, trace=record_llm_trace,
                                     protagonist_name=character_name)
@@ -601,8 +789,16 @@ def main(argv: list[str] | None = None) -> int:
                 for scene in scenes:
                     scene.character_present = True
             review_scenes(scenes, output, character_name)
+        if args.motion_preset == "auto":
+            write_progress(output, "推荐场景运镜", 65)
+            recommend_scene_motions(scenes, args.llm_base_url, args.llm_model, args.llm_api_key,
+                                    captions=captions, visual_style=args.visual_style, trace=record_llm_trace)
+        else:
+            for i, scene in enumerate(scenes):
+                scene.motion = choose_preset(args.motion_preset, i, scene.character_present)
         for i, scene in enumerate(scenes, 1):
-            print(f"场景 {i} [{scene.start:.2f}s - {scene.end:.2f}s] 提示词：{scene.prompt}", flush=True)
+            print(f"场景 {i} [{scene.start:.2f}s - {scene.end:.2f}s] 提示词：{scene.prompt}\n"
+                  f"场景 {i} 运镜：{scene.motion}；原因：{scene.motion_reason}", flush=True)
         images_dir = (args.images_dir or output / "images").resolve()
         if args.generate_images:
             images_dir.mkdir(parents=True, exist_ok=True)
@@ -613,12 +809,16 @@ def main(argv: list[str] | None = None) -> int:
             references = character_references if scene.character_present else []
             final_prompt = compose_scene_prompt(scene.prompt, args.image_prompt_suffix, character_name,
                                                 scene.character_present, bool(references))
-            fingerprint = image_request_fingerprint(final_prompt, args.drawthings_model or "", args.width,
-                                                    args.height, args.image_steps, args.image_seed, references)
+            image_width, image_height = generation_size(args.width, args.height, scene.motion)
+            if scene.motion == "parallax" and scene.character_present:
+                image_width, image_height = args.width, args.height
+            fingerprint = image_request_fingerprint(final_prompt, args.drawthings_model or "", image_width,
+                                                    image_height, args.image_steps, args.image_seed, references)
             metadata = images_dir / f"scene_{i:03}.request.json"
             record = {"scene": i, "prompt": final_prompt, "seed": args.image_seed,
                       "references": [str(path) for path in references], "model": args.drawthings_model,
-                      "steps": args.image_steps, "fingerprint": fingerprint, "status": "pending"}
+                      "steps": args.image_steps, "width": image_width, "height": image_height,
+                      "fingerprint": fingerprint, "status": "pending"}
             print(f"场景 {i} 最终生图提示词：{final_prompt}\nseed：{args.image_seed}；参考图：{record['references']}", flush=True)
             if image.is_file() and (args.images_dir is not None or image_cache_matches(metadata, fingerprint)):
                 scene.image = str(image)
@@ -626,10 +826,11 @@ def main(argv: list[str] | None = None) -> int:
             elif args.generate_images:
                 try:
                     temporary_image = images_dir / f"scene_{i:03}.pending.png"
-                    generate_image(final_prompt, temporary_image, args.drawthings_model or "", args.width, args.height,
+                    needs_layer = scene.motion == "parallax" and scene.character_present
+                    generate_image(final_prompt, temporary_image, args.drawthings_model or "", image_width, image_height,
                                    args.image_steps,
                                    progress=lambda percent: write_progress(output, f"生成图片 {i}/{len(scenes)}",
-                                                                           65 + round(((i - 1) + percent / 100) / len(scenes) * 20)),
+                                                                           65 + round(((i - 1) + percent / (200 if needs_layer else 100)) / len(scenes) * 20)),
                                    seed=args.image_seed, references=references)
                     temporary_image.replace(image)
                     record["status"] = "generated"
@@ -639,6 +840,47 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"警告：第 {i} 段生图失败，将使用黑色背景：{exc}", file=sys.stderr)
                     record["status"] = "failed"
                     record["error"] = str(exc)
+            if scene.motion == "parallax" and scene.character_present and scene.image:
+                background = images_dir / f"scene_{i:03}_background.png"
+                foreground = images_dir / f"scene_{i:03}_foreground.png"
+                background_prompt = (f"{scene.prompt}\nEmpty environment plate of this setting, same era, architecture, "
+                                     "lighting and camera angle. No people, no figures, no silhouettes, no text."
+                                     + (f"\n{args.image_prompt_suffix}" if args.image_prompt_suffix else ""))
+                background_width, background_height = generation_size(args.width, args.height, "parallax")
+                background_fingerprint = image_request_fingerprint(background_prompt, args.drawthings_model or "",
+                                                                    background_width, background_height, args.image_steps,
+                                                                    args.image_seed, [])
+                background_metadata = images_dir / f"scene_{i:03}_background.request.json"
+                try:
+                    print(f"场景 {i} 空背景提示词：{background_prompt}", flush=True)
+                    if not background.is_file() or not image_cache_matches(background_metadata, background_fingerprint):
+                        pending_background = images_dir / f"scene_{i:03}_background.pending.png"
+                        generate_image(background_prompt, pending_background, args.drawthings_model or "",
+                                       background_width, background_height, args.image_steps, seed=args.image_seed,
+                                       progress=lambda percent: write_progress(output, f"生成空背景 {i}/{len(scenes)}",
+                                                                               65 + round(((i - 1) + 0.5 + percent / 200) / len(scenes) * 20)))
+                        pending_background.replace(background)
+                        background_metadata.write_text(json.dumps({"fingerprint": background_fingerprint,
+                                                                   "prompt": background_prompt}, ensure_ascii=False,
+                                                                  indent=2), encoding="utf-8")
+                    if not foreground.is_file() or foreground.stat().st_mtime < Path(scene.image).stat().st_mtime:
+                        cutout = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
+                        run([str(cutout), str(scene.image), str(foreground)])
+                    validate_foreground(foreground)
+                    scene.background, scene.foreground = str(background), str(foreground)
+                    record["layer_status"] = "ready"
+                    print(f"场景 {i} 已生成分层素材：{background.name}、{foreground.name}", flush=True)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    record["layer_status"] = "failed"
+                    record["layer_error"] = str(exc)
+                    print(f"警告：第 {i} 段分层素材失败，改用单图动效：{exc}", file=sys.stderr)
+            if scene.motion == "parallax" and not scene.foreground:
+                scene.motion = choose_preset("parallax", i - 1, False)
+            if not scene.image and scene.motion != "static":
+                scene.motion = "static"
+                scene.motion_reason = "无图片可供运镜，使用黑色静止画面"
+                print(f"场景 {i} 无图片可供运镜，改用黑色静止画面。", flush=True)
+            record["motion"] = scene.motion
             image_records.append(record)
         (output / "image_generation.json").write_text(json.dumps(image_records, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "scenes.json").write_text(json.dumps([asdict(s) for s in scenes], ensure_ascii=False, indent=2), encoding="utf-8")

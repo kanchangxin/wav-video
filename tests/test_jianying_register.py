@@ -49,8 +49,21 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(index["all_draft_store"][-1]["draft_json_file"], str(dest / "draft_info.json"))
         self.assertEqual(index["draft_ids"], 1)
 
-    def test_existing_name_does_not_get_overwritten(self):
+    def test_existing_name_gets_numbered_without_overwriting(self):
         (self.root / "taken").mkdir()
+        (self.root / "taken (2)").mkdir()
         with patch("jianying_register.installed_version", return_value="5.5.0"):
-            with self.assertRaises(FileExistsError):
-                register_draft(self.source, self.root, "taken")
+            dest = register_draft(self.source, self.root, "taken")
+        self.assertEqual(dest.name, "taken (3)")
+        self.assertTrue((self.root / "taken").is_dir())
+        index = json.loads((self.root / "root_meta_info.json").read_text())
+        self.assertEqual(index["all_draft_store"][-1]["draft_name"], "taken (3)")
+
+    def test_index_only_name_collision_gets_numbered(self):
+        index_path = self.root / "root_meta_info.json"
+        index = json.loads(index_path.read_text())
+        index["all_draft_store"].append({"draft_id": "taken-id", "draft_name": "taken"})
+        index_path.write_text(json.dumps(index))
+        with patch("jianying_register.installed_version", return_value="5.5.0"):
+            dest = register_draft(self.source, self.root, "taken")
+        self.assertEqual(dest.name, "taken (2)")

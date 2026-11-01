@@ -129,6 +129,18 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(command[command.index("--image-prompt-suffix") + 1], "cinematic light")
         self.assertEqual(different_command[different_command.index("--drawthings-model") + 1], "z_image.ckpt")
 
+    def test_motion_preset_passes_to_pipeline_and_parallax_requires_profile(self):
+        manager = self.app.extensions["job_manager"]
+        command, _, _ = manager._command({"audio_id": "root:中文旁白.m4a", "output": "both",
+                                          "scene_mode": "fixed", "motion_preset": "push_in"}, self.root / "runs" / "motion")
+        self.assertEqual(command[command.index("--motion-preset") + 1], "push_in")
+        with self.assertRaisesRegex(ValueError, "分层视差需要"):
+            manager._command({"audio_id": "root:中文旁白.m4a", "output": "both",
+                              "scene_mode": "fixed", "motion_preset": "parallax"}, self.root / "runs" / "motion")
+        with self.assertRaisesRegex(ValueError, "自动运镜需要"):
+            manager._command({"audio_id": "root:中文旁白.m4a", "output": "both",
+                              "scene_mode": "fixed", "motion_preset": "auto"}, self.root / "runs" / "motion")
+
     def test_profile_model_can_be_changed_and_profile_can_be_deleted(self):
         models = [{"id": "flux.ckpt", "name": "FLUX"}, {"id": "z_image.ckpt", "name": "Z Image"}]
         with patch("web_app.list_models", return_value=models):

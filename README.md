@@ -80,6 +80,12 @@ uv run python audio_video.py "信使高欢的逆袭.m4a" \
 
 也可自行放入图片，然后使用 `--images-dir 图片目录 --scene-mode fixed`；按 `scene_001.png`、`scene_002.png` 顺序命名，缺少的场景自动变黑。
 
+### 场景动效
+
+页面“场景动效”可选择静止、大模型逐场景自动推荐、缓慢推近、拉远、左右平移或分层视差；默认保持静止。命令行对应 `--motion-preset static|auto|push_in|pull_out|pan_left|pan_right|parallax`。自动推荐需要填写 LLM API 和模型名，模型为每段选择一种运镜；输入、输出记录在 `llm_trace.log`，最终选择和理由记录在 `scenes.json`。拉远和平移的生图宽高至少增加 25% 并向上取整到 64 的倍数，剪映草稿保留大图并写入可编辑关键帧。
+
+分层视差需要开启 Draw Things 生图并选择角色档案。任务确认“主角在画面中”后，程序会从该场景图片抠出透明人物，同时额外生成无人空背景；在剪映草稿里保存为背景与人物两条可编辑视频轨道，分别添加原生位移、缩放关键帧。无主角的场景使用单图平移；某段分层素材失败或抠图近乎全透明时，仅该段回退到单图平移。分层图片保存在 `images/scene_001_background.png`、`images/scene_001_foreground.png` 等路径。MP4 使用同一组运动参数合成。当前抠图工具只处理单个人物主体；头发边缘、遮挡和空背景与人物的透视一致性需要人工检查。已在本机剪映 11.7.0 打开双图层测试草稿，并确认背景和前景的位置关键帧随时间变化。
+
 ## 剪映草稿
 
 ```bash
@@ -100,6 +106,7 @@ uv run python audio_video.py "信使高欢的逆袭.m4a" \
 | `--width 1280 --height 720 --fps 25` | 视频尺寸和帧率，宽高必须为偶数 |
 | `--whisper-model small --device cpu --language zh` | 本地转写模型和语言 |
 | `--scene-mode none\|fixed\|llm` | 不分段、定时分段、LLM 语义分段 |
+| `--motion-preset auto` | 由大模型逐场景选择运镜，需要 `--llm-model`；默认 `static` |
 | `--transcript-json 文件` | 使用已校对字幕，跳过 ASR |
 | `--register-jianying` | 将草稿登记到检测到的剪映草稿列表（支持 5.x 与 11.x） |
 

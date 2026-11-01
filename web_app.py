@@ -28,6 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 AUDIO_SUFFIXES = {".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".mp4"}
 OUTPUT_TYPES = {"mp4", "jianying", "both", "assets"}
 SCENE_MODES = {"none", "fixed", "llm"}
+MOTION_PRESETS = {"static", "auto", "push_in", "pull_out", "pan_left", "pan_right", "parallax"}
 
 
 def now_iso() -> str:
@@ -121,6 +122,11 @@ class JobManager:
         profile_id = str(data.get("character_profile_id") or "").strip()
         if profile_id and not generate_images:
             raise ValueError("使用角色档案需要开启 Draw Things 生图")
+        motion_preset = str(data.get("motion_preset") or "static")
+        if motion_preset not in MOTION_PRESETS:
+            raise ValueError("动效预设无效")
+        if motion_preset == "parallax" and (not generate_images or not profile_id):
+            raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
         max_seconds = data.get("max_seconds")
         if max_seconds not in (None, ""):
             max_seconds = number("max_seconds", 30, 1, 3600)
@@ -129,6 +135,8 @@ class JobManager:
         llm_model = str(data.get("llm_model", "")).strip()
         if scene_mode == "llm" and not llm_model:
             raise ValueError("大模型分段需要填写 LLM 模型名称")
+        if motion_preset == "auto" and not llm_model:
+            raise ValueError("自动运镜需要填写 LLM 模型名称")
         visual_style = str(data.get("visual_style", "")).strip()
         if len(visual_style) > 4000:
             raise ValueError("全局画面设定不能超过 4000 个字符")
@@ -143,7 +151,7 @@ class JobManager:
         command = [sys.executable, str(SCRIPT_DIR / "audio_video.py"), str(audio), "--output-dir", str(output),
                    "--output", output_type, "--scene-mode", scene_mode, "--whisper-model", str(data.get("whisper_model") or "small"),
                    "--language", str(data.get("language", "zh")), "--width", str(width), "--height", str(height), "--fps", str(fps),
-                   "--scene-seconds", str(scene_seconds)]
+                   "--scene-seconds", str(scene_seconds), "--motion-preset", motion_preset]
         if image_steps is not None:
             command += ["--image-steps", str(image_steps)]
         if generate_images:

@@ -98,16 +98,18 @@ def register_draft(source: Path, root: Path | None = None, name: str | None = No
     name = name or source.name
     if name in (".", "..") or not name or "/" in name or "\\" in name:
         raise ValueError("草稿名称不能包含路径分隔符")
-    destination = root / name
-    if destination.exists():
-        raise FileExistsError(f"剪映中已有同名草稿：{name}")
     index_path = root / "root_meta_info.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
     records = index.get("all_draft_store")
     if not isinstance(records, list) or not records or not isinstance(records[0], dict):
         raise ValueError("剪映草稿索引格式不受支持")
-    if any(record.get("draft_name") == name for record in records):
-        raise FileExistsError(f"剪映索引中已有同名草稿：{name}")
+    base_name = name
+    used_names = {record.get("draft_name") for record in records}
+    suffix = 2
+    while name in used_names or (root / name).exists():
+        name = f"{base_name} ({suffix})"
+        suffix += 1
+    destination = root / name
     content = json.loads((source / "draft_content.json").read_text(encoding="utf-8"))
     meta = json.loads((source / "draft_meta_info.json").read_text(encoding="utf-8"))
     if not isinstance(content, dict) or not isinstance(meta, dict):
