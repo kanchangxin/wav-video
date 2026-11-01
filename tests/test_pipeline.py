@@ -8,10 +8,124 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts
+from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts, compose_scene_prompt, image_request_fingerprint, review_scenes
 
 
 class TimelineTests(unittest.TestCase):
+    def test_identity_prompt_only_applies_when_protagonist_is_present(self):
+        with_character = compose_scene_prompt("ancient battlefield", "cinematic light", "高欢", True, True)
+        without_character = compose_scene_prompt("empty battlefield", "cinematic light", "高欢", False, True)
+        self.assertIn("Use image 1 as the identity reference", with_character)
+        self.assertIn("高欢", with_character)
+        self.assertTrue(with_character.endswith("cinematic light"))
+        self.assertNotIn("identity reference", without_character)
+        self.assertTrue(without_character.endswith("cinematic light"))
+
+    def test_image_fingerprint_changes_with_reference_content_and_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "front.png"
+            image.write_bytes(b"first portrait")
+            first = image_request_fingerprint("a scene", "flux.ckpt", 1280, 720, None, 271829, [image])
+            self.assertNotEqual(first, image_request_fingerprint("a scene", "flux.ckpt", 1280, 720, None, 271830, [image]))
+            image.write_bytes(b"revised portrait")
+            self.assertNotEqual(first, image_request_fingerprint("a scene", "flux.ckpt", 1280, 720, None, 271829, [image]))
+
+    def test_scene_review_applies_explicit_presence_before_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            scenes = [Scene(0, 1, "city"), Scene(1, 2, "empty road")]
+            def answer():
+                import time
+                draft = output / "scenes_draft.json"
+                for _ in range(100):
+                    if draft.is_file():
+                        break
+                    time.sleep(0.01)
+                (output / "scene_review.json").write_text(json.dumps({"scenes": [
+                    {"character_present": True, "prompt": "hero in city"},
+                    {"character_present": False, "prompt": "empty road"},
+                ]}))
+            import threading
+            worker = threading.Thread(target=answer)
+            worker.start()
+            reviewed = review_scenes(scenes, output, "高欢", poll_interval=0.01)
+            worker.join()
+            self.assertEqual([(s.prompt, s.character_present) for s in reviewed],
+                             [("hero in city", True), ("empty road", False)])
+
+    def test_pipeline_sends_reference_only_for_confirmed_protagonist_scene(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([
+                {"start": 0, "end": 0.8, "text": "高欢在城中"},
+                {"start": 1, "end": 1.8, "text": "空旷街道"},
+            ], ensure_ascii=False), encoding="utf-8")
+            profile = root / "characters" / "hero"
+            profile.mkdir(parents=True)
+            (profile / "front.png").write_bytes(b"reference")
+            (profile / "profile.json").write_text(json.dumps({"name": "高欢", "views": {
+                "front": {"status": "approved"}, "three_quarter": {"status": "empty"},
+                "full_body": {"status": "empty"}}}), encoding="utf-8")
+            output = root / "out"
+            import threading
+            def confirm():
+                import time
+                for _ in range(100):
+                    if (output / "scenes_draft.json").is_file():
+                        break
+                    time.sleep(0.01)
+                (output / "scene_review.json").write_text(json.dumps({"scenes": [
+                    {"prompt": "hero scene", "character_present": True},
+                    {"prompt": "empty street", "character_present": False},
+                ]}))
+            calls = []
+            def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+                calls.append((prompt, kwargs["references"], kwargs["seed"]))
+                path.write_bytes(b"generated")
+            worker = threading.Thread(target=confirm)
+            worker.start()
+            with patch("audio_video.generate_image", side_effect=fake_generate):
+                result = main([str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
+                               "--output", "assets", "--scene-mode", "fixed", "--scene-seconds", "1",
+                               "--generate-images", "--drawthings-model", "flux.ckpt", "--character-profile", str(profile),
+                               "--review-scenes", "--image-prompt-suffix", "cinematic light"])
+            worker.join()
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([len(call[1]) for call in calls], [1, 0])
+            self.assertIn("identity reference", calls[0][0])
+            self.assertNotIn("identity reference", calls[1][0])
+            self.assertTrue(all(call[0].endswith("cinematic light") and call[2] == 271829 for call in calls))
+
+    def test_changed_seed_regenerates_existing_scene_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([{"start": 0, "end": 0.8, "text": "city"}]))
+            output = root / "out"
+            calls = []
+            def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+                calls.append(kwargs["seed"])
+                path.write_bytes(str(kwargs["seed"]).encode())
+            base = [str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
+                    "--output", "assets", "--scene-mode", "fixed", "--generate-images",
+                    "--drawthings-model", "flux.ckpt"]
+            with patch("audio_video.generate_image", side_effect=fake_generate):
+                self.assertEqual(main(base), 0)
+                self.assertEqual(main(base), 0)
+                self.assertEqual(main(base + ["--image-seed", "271830"]), 0)
+            self.assertEqual(calls, [271829, 271830])
+            self.assertEqual((output / "images/scene_001.png").read_bytes(), b"271830")
+            metadata = json.loads((output / "images/scene_001.request.json").read_text())
+            self.assertEqual(metadata["status"], "generated")
+
     def test_incomplete_whisper_model_fails_with_actionable_error(self):
         with patch("audio_video.download_whisper_model", side_effect=RuntimeError("model.bin incomplete")):
             with self.assertRaisesRegex(RuntimeError, "medium.*未完整下载"):
