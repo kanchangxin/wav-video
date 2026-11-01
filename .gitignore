@@ -1,0 +1,25 @@
+.venv/
+.uv-cache/
+.hf-cache/
+__pycache__/
+*.pyc
+*_output/
+uploads/
+runs/
+
+# Local media and rendered artifacts
+*.m4a
+*.mp3
+*.wav
+*.aac
+*.flac
+*.ogg
+*.mp4
+*.mov
+
+# Draw Things local binary, models and generated images
+tools/drawthings/draw-things-cli
+tools/drawthings/results/
+
+# macOS metadata
+.DS_Store

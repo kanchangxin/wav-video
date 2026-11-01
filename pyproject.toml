@@ -1,0 +1,15 @@
+[project]
+name = "audio-story-video"
+version = "0.1.0"
+description = "Turn narrated audio into subtitles, illustrated scenes, MP4, or Jianying drafts"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "faster-whisper>=1.2.1,<2",
+  "pyJianYingDraft>=0.3.1,<0.4",
+  "Flask>=3.1,<4",
+  "socksio>=1.0.0",
+]
+
+[tool.uv]
+package = false

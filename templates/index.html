@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>声音成片工作台</title>
+  <style>
+    :root{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:#e9edfa;background:#101321;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 80% -10%,#2b3153 0,transparent 36%),#101321}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}a{color:#b7c9ff}
+    .shell{max-width:1500px;margin:auto;padding:34px 36px 60px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px}
+    .eyebrow{font-size:12px;letter-spacing:.18em;color:#98a8dc;text-transform:uppercase;font-weight:750}.top h1{font-size:clamp(30px,4vw,48px);letter-spacing:-.04em;line-height:1.1;margin:11px 0 10px}.top p{color:#abb4cd;margin:0;line-height:1.65}
+    .local{border:1px solid #3d496d;border-radius:999px;padding:10px 14px;color:#b4c8ff;background:#1b2440;font-size:13px;white-space:nowrap}
+    .grid{display:grid;grid-template-columns:minmax(370px,580px) minmax(400px,1fr);gap:22px;align-items:start}
+    .panel{border:1px solid #303850;background:#1a1f30;border-radius:18px;box-shadow:0 16px 45px #0709103b;overflow:hidden}.panel-head{padding:21px 24px;border-bottom:1px solid #303850;display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-head h2{font-size:17px;margin:0}.panel-head span{color:#919ebc;font-size:12px}
+    .body{padding:22px 24px}.section{margin-bottom:26px}.section:last-child{margin-bottom:0}.section-title{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:750;color:#c4d0ed;margin:0 0 13px}.num{display:inline-flex;width:23px;height:23px;border-radius:7px;align-items:center;justify-content:center;background:#35436b;color:#c9d6ff;font-size:11px}
+    label{display:block;color:#aeb8d0;font-size:12px;margin:14px 0 7px;font-weight:650}input:not([type=checkbox]):not([type=file]),select,textarea{width:100%;background:#121728;border:1px solid #38415c;border-radius:10px;color:#edf2ff;padding:11px 12px;outline:none;min-height:42px}textarea{resize:vertical;min-height:118px;line-height:1.5}input:focus,select:focus,textarea:focus{border-color:#8a9df5;box-shadow:0 0 0 3px #697ddd33}input::placeholder,textarea::placeholder{color:#69748f}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row.three{grid-template-columns:repeat(3,1fr)}.inline{display:flex;gap:9px;align-items:center}.inline select{flex:1}.ghost{background:#242c44;color:#d8e1ff;border:1px solid #465274;border-radius:9px;padding:9px 12px;min-height:42px}.ghost:hover{background:#303b5b}
+    .upload{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px dashed #4c597a;border-radius:11px;padding:12px 14px;margin-top:10px;color:#aeb8d0;font-size:12px}.upload input{max-width:205px;color:#b6c5ed;font-size:11px}
+    .hint{color:#8592b0;font-size:11px;margin:8px 0 0;line-height:1.5}.options{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.option{display:flex;flex-direction:column;gap:5px;padding:12px 10px;border:1px solid #3b4560;border-radius:10px;background:#151b2c;color:#e3eafc;cursor:pointer}.option input{position:absolute;opacity:0}.option:has(input:checked){border-color:#91a3fb;background:#2a365a;box-shadow:inset 0 0 0 1px #91a3fb}.option strong{font-size:13px}.option small{font-size:10px;color:#9daac8}
+    .toggle{display:flex;align-items:center;gap:10px;color:#dce5fb;font-size:13px;margin:16px 0}.toggle input{width:16px;height:16px;accent-color:#9babff}.subtle{border-left:2px solid #47547a;padding-left:14px;margin-top:12px}.hidden{display:none!important}
+    .actions{padding:17px 24px 22px;border-top:1px solid #303850;background:#181e2e}.primary{width:100%;background:#a9b9ff;color:#12172b;border:0;border-radius:11px;padding:13px 16px;font-weight:800;font-size:14px}.primary:hover{background:#c0ccff}.primary:disabled{opacity:.55;cursor:wait}.error{display:none;border:1px solid #af5b69;background:#492832;color:#ffd9df;border-radius:9px;padding:10px 12px;font-size:12px;margin-bottom:12px}.error.show{display:block}
+    .status-layout{display:grid;grid-template-columns:200px 1fr;min-height:550px}.history{border-right:1px solid #303850;padding:14px;max-height:780px;overflow:auto}.history-title{font-size:11px;letter-spacing:.08em;color:#8190b1;font-weight:750;margin:4px 7px 12px;text-transform:uppercase}.history-row{display:flex;align-items:center;gap:3px;margin-bottom:6px}.job-btn{display:block;text-align:left;flex:1;min-width:0;border:1px solid transparent;background:transparent;color:#cfdaef;padding:10px;border-radius:10px}.job-btn:hover,.job-btn.active{background:#2a3552;border-color:#4d5d87}.job-btn strong{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.job-btn span{display:block;color:#8797b7;font-size:10px;margin-top:4px}.delete-job{border:0;background:transparent;color:#b78692;border-radius:7px;padding:6px;font-size:11px}.delete-job:hover{background:#4b2e38;color:#ffd9df}.detail{padding:22px 24px;min-width:0}.empty{min-height:420px;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#8694b5;text-align:center}.empty-mark{width:72px;height:72px;border:1px solid #465273;border-radius:22px;background:#252f4a;display:grid;place-items:center;font-size:28px;margin-bottom:19px;color:#a9b9ff}.empty strong{font-size:17px;color:#d4def4}.empty p{font-size:12px;line-height:1.6;max-width:260px}
+    .job-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.job-title h3{font-size:19px;margin:0 0 5px;word-break:break-all}.job-title p{color:#8d9abb;font-size:11px;margin:0}.pill{font-size:11px;padding:6px 9px;border-radius:999px;background:#39435a;color:#cfdaef;white-space:nowrap}.pill.running{background:#55472c;color:#ffdd97}.pill.completed{background:#24493f;color:#8be4bd}.pill.failed,.pill.cancelled{background:#59343d;color:#ffb2c0}
+    .metric{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:20px 0}.metric>div{background:#141a2a;border:1px solid #303a54;border-radius:10px;padding:10px 12px;min-width:0}.metric small{display:block;color:#8391af;font-size:10px;margin-bottom:5px}.metric span{display:block;color:#e2eaf9;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.path-row{display:flex;align-items:center;gap:7px}.path-row span{flex:1;min-width:0}.open-dir{border:1px solid #4d5d87;background:#273453;color:#e3eaff;border-radius:7px;padding:4px 8px;font-size:11px;white-space:nowrap}.open-dir:hover{background:#34466e}.progress-box{border:1px solid #3b4d72;background:#151d30;border-radius:10px;padding:12px;margin:12px 0}.progress-label{display:flex;justify-content:space-between;gap:8px;color:#d4dff5;font-size:12px;margin-bottom:7px}.progress-box progress,.upload-progress progress{width:100%;height:9px;accent-color:#9fb3ff}.upload-progress{margin-top:8px;color:#aebee1;font-size:11px}.registered-row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    .detail h4{font-size:12px;color:#bdcae8;margin:20px 0 9px}.log{background:#101524;border:1px solid #2e3851;border-radius:10px;padding:13px;white-space:pre-wrap;overflow:auto;max-height:210px;min-height:78px;font:11px/1.55 ui-monospace,SFMono-Regular,monospace;color:#a6b6d4}.files{display:flex;flex-wrap:wrap;gap:8px}.file-link{display:inline-flex;border:1px solid #48577b;background:#273453;border-radius:8px;padding:8px 10px;text-decoration:none;font-size:11px}.file-link:hover{background:#34466e}.preview{white-space:pre-wrap;background:#111827;border:1px solid #303a54;border-radius:10px;padding:13px;max-height:180px;overflow:auto;color:#d7e0f4;font-size:12px;line-height:1.65}.video{width:100%;max-height:300px;border-radius:10px;background:#000}.cancel{border:1px solid #89525f;background:#3b2730;color:#ffcad3;padding:7px 10px;border-radius:8px;font-size:11px}
+    @media(max-width:1020px){.grid{grid-template-columns:1fr}.status-layout{grid-template-columns:170px 1fr}}@media(max-width:650px){.shell{padding:20px 14px}.top{display:block}.local{display:inline-block;margin-top:16px}.panel-head,.body,.actions,.detail{padding-left:16px;padding-right:16px}.options{grid-template-columns:repeat(2,1fr)}.status-layout{display:block}.history{border-right:0;border-bottom:1px solid #303850;max-height:155px;display:flex;gap:6px;overflow:auto}.history-title{display:none}.job-btn{min-width:140px;margin:0}.row.three{grid-template-columns:repeat(3,1fr)}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div><div class="eyebrow">LOCAL AUDIO STUDIO</div><h1>声音成片工作台</h1><p>从旁白出发，完成转写、场景图片、字幕视频与剪映草稿。</p></div>
+      <div class="local">● 仅在本机运行 · 127.0.0.1</div>
+    </header>
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head"><h2>新建任务</h2><span>设置一次，随时查看结果</span></div>
+        <form id="job-form" class="body">
+          <div class="section">
+            <h3 class="section-title"><span class="num">01</span>音频与转写</h3>
+            <label for="audio-id">选择音频</label>
+            <div class="inline"><select id="audio-id" required></select><button class="ghost" type="button" id="refresh-audio">刷新</button></div>
+            <div class="upload"><span id="upload-label">或者上传本地音频</span><input id="upload-file" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.mp4"></div><div id="upload-progress" class="upload-progress hidden"><span id="upload-percent">上传中 0%</span><progress id="upload-bar" max="100" value="0"></progress></div>
+            <div class="row"><div><label for="whisper-model">Whisper 模型</label><select id="whisper-model"><option value="tiny">tiny · 快速测试</option><option value="small">small · 标准</option><option value="medium">medium · 更准确</option><option value="large-v3">large-v3 · 高质量</option></select></div><div><label for="language">语言</label><select id="language"><option value="zh">中文</option><option value="">自动识别</option><option value="en">英语</option></select></div></div>
+            <label class="toggle"><input id="quick-test" type="checkbox" checked>只处理前 <input id="max-seconds" type="number" min="1" max="3600" value="20" style="width:72px;min-height:32px;padding:5px 8px"> 秒，先快速试运行</label>
+            <label for="transcript-json">复用字幕 JSON（可选，项目目录内路径）</label><input id="transcript-json" placeholder="例如 runs/任务编号/transcript.json"><p class="hint">填入已校对的字幕 JSON 可跳过语音转写。</p>
+          </div>
+          <div class="section">
+            <h3 class="section-title"><span class="num">02</span>画面与输出</h3>
+            <label>输出内容</label><div class="options">
+              <label class="option"><input type="radio" name="output" value="assets"><strong>仅素材</strong><small>文字与字幕</small></label>
+              <label class="option"><input type="radio" name="output" value="mp4" checked><strong>MP4</strong><small>直接成片</small></label>
+              <label class="option"><input type="radio" name="output" value="jianying"><strong>剪映</strong><small>可编辑草稿</small></label>
+              <label class="option"><input type="radio" name="output" value="both"><strong>两者</strong><small>成片与草稿</small></label>
+            </div>
+            <div class="row"><div><label for="scene-mode">场景分段</label><select id="scene-mode"><option value="none">不分段 · 黑色背景</option><option value="fixed">固定时长分段</option><option value="llm">大模型语义分段</option></select></div><div id="scene-seconds-wrap" class="hidden"><label for="scene-seconds">每段约多少秒</label><input id="scene-seconds" type="number" min="1" max="600" value="25"></div></div>
+            <label class="toggle"><input id="generate-images" type="checkbox">调用 Draw Things 为场景生图</label>
+            <div id="llm-fields" class="subtle hidden"><label for="llm-base-url">LLM API 地址</label><input id="llm-base-url" value="http://127.0.0.1:1234/v1"><div class="row"><div><label for="llm-model">模型名称</label><input id="llm-model" placeholder="例如 qwen3"></div><div><label for="llm-api-key">API Key（可选）</label><input id="llm-api-key" type="password" autocomplete="off"></div></div><label for="visual-style">全局画面设定（可选）</label><textarea id="visual-style" placeholder="例如：\n时代：北魏\n地点：邺城与北方战场\n气氛：苍凉、肃杀、史诗感\n画风：电影级历史写实，低饱和冷灰色\n镜头：远景与人物特写结合"></textarea><p class="hint">这些设定会加入每一批语义分段的系统提示词，留空则由模型自行判断。</p></div>
+            <div id="draw-fields" class="subtle hidden"><div class="row"><div><label for="drawthings-model">本机已下载模型</label><div class="inline"><select id="drawthings-model"><option value="">正在读取模型…</option></select><button id="refresh-models" class="ghost" type="button">刷新</button></div></div><div><label for="image-steps">生图步数（可选）</label><input id="image-steps" type="number" min="1" max="150" placeholder="模型推荐值"></div></div><p id="drawthings-status" class="hint">通过本机 Draw Things CLI 生图，不需要开启 HTTP 服务。</p></div>
+            <div id="draft-fields" class="subtle hidden"><label for="jianying-drafts-dir">剪映草稿根目录（可选）</label><input id="jianying-drafts-dir" placeholder="留空自动读取剪映设置"><label for="draft-name">草稿名称（可选）</label><input id="draft-name" placeholder="默认使用音频文件名"><label class="toggle"><input id="register-jianying" type="checkbox">生成后注册到剪映首页</label><p id="jianying-status" class="hint">正在检测剪映…</p></div>
+            <div class="row three"><div><label for="width">宽度</label><input id="width" type="number" min="160" max="4096" step="2" value="1280"></div><div><label for="height">高度</label><input id="height" type="number" min="160" max="4096" step="2" value="720"></div><div><label for="fps">帧率</label><input id="fps" type="number" min="1" max="60" value="25"></div></div>
+          </div>
+        </form>
+        <div class="actions"><div id="error" class="error" role="alert"></div><button id="start" class="primary" type="submit" form="job-form">开始处理 →</button><p class="hint">长音频处理需要一些时间；任务在后台运行，页面可以刷新。</p></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>任务与结果</h2><span id="job-count">0 个任务</span></div>
+        <div class="status-layout"><aside id="history" class="history"><div class="history-title">最近任务</div></aside><div id="detail" class="detail"><div class="empty"><div class="empty-mark">♫</div><strong>准备好开始</strong><p>选择音频，先用 20 秒试运行检查转写与画面。</p></div></div></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    let activeJob = null, jobs = [], jianyingSupported = false, drawModelsLoaded = false, renderedKey = '';
+    const jobStatusText = {running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'};
+    async function api(url, options={}) {
+      const r = await fetch(url, options);
+      const contentType = r.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(`服务器返回了非 JSON 响应（HTTP ${r.status}），请查看服务日志`);
+      }
+      let data;
+      try { data = await r.json(); }
+      catch { throw new Error(`服务器返回的 JSON 无法解析（HTTP ${r.status}）`); }
+      if (!r.ok) throw new Error(data.error || `请求失败 ${r.status}`);
+      return data;
+    }
+    async function checkJianying() { try { const root=$('jianying-drafts-dir').value.trim(); const s=await api(`/api/jianying/status?root=${encodeURIComponent(root)}`); jianyingSupported=s.supported; $('jianying-status').textContent=s.supported?`已检测到剪映 ${s.version}，草稿目录：${s.root}`:`${s.reason} · 草稿目录：${s.root}`; $('register-jianying').disabled=!s.supported; if(!s.supported)$('register-jianying').checked=false; const current=jobs.find(j=>j.id===activeJob); if(current)showJob(current); } catch(e) { $('jianying-status').textContent=e.message; $('register-jianying').disabled=true; } }
+    function error(message) { const e = $('error'); e.textContent = message || ''; e.classList.toggle('show', !!message); }
+    function selectedOutput() { return document.querySelector('input[name="output"]:checked').value; }
+    async function loadModels(force=false) {
+      if (drawModelsLoaded && !force) return;
+      const select = $('drawthings-model');
+      const previous = select.value;
+      try {
+        const result = await api('/api/drawthings/models');
+        select.replaceChildren();
+        for (const model of result.models) {
+          const option = document.createElement('option'); option.value = model.id;
+          option.textContent = `${model.name} · ${model.id}`; select.append(option);
+        }
+        const recommended = [...select.options].find(o => o.value.startsWith('z_image_turbo'));
+        if ([...select.options].some(o=>o.value===previous)) select.value=previous;
+        else if (recommended) select.value = recommended.value;
+        if (!result.models.length) { select.add(new Option('没有检测到已下载模型', '')); }
+        $('drawthings-status').textContent = result.models.length ? `已检测到 ${result.models.length} 个本地模型；步数留空使用模型推荐值。` : '没有检测到已下载模型。';
+        drawModelsLoaded = true;
+      } catch (e) { drawModelsLoaded=false; select.replaceChildren(new Option('模型读取失败', '')); $('drawthings-status').textContent = e.message; }
+    }
+    function updateFields() { const scene = $('scene-mode').value; $('scene-seconds-wrap').classList.toggle('hidden', scene !== 'fixed'); $('llm-fields').classList.toggle('hidden', scene !== 'llm'); if (scene === 'none') $('generate-images').checked = false; $('generate-images').disabled = scene === 'none'; $('draw-fields').classList.toggle('hidden', !$('generate-images').checked); if ($('generate-images').checked) loadModels(); $('draft-fields').classList.toggle('hidden', !['jianying','both'].includes(selectedOutput())); $('max-seconds').disabled = !$('quick-test').checked; }
+    async function loadAudio(selectId) { const data = await api('/api/audio'); const select = $('audio-id'); const old = selectId || select.value; select.replaceChildren(); for (const file of data.files) { const o = document.createElement('option'); o.value = file.id; o.textContent = file.name; select.append(o); } if (old && [...select.options].some(o => o.value === old)) select.value = old; if (!data.files.length) { const o = document.createElement('option'); o.textContent = '请先上传音频'; o.value = ''; select.append(o); } }
+    function fileUrl(jobId, name) { return `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`; }
+    function renderHistory() {
+      const history = $('history'); history.querySelectorAll('.history-row').forEach(n => n.remove());
+      $('job-count').textContent = `${jobs.length} 个任务`;
+      for (const job of jobs) {
+        const row = document.createElement('div'); row.className = 'history-row';
+        const b = document.createElement('button'); b.type = 'button'; b.className = `job-btn ${activeJob === job.id ? 'active' : ''}`;
+        const title = document.createElement('strong'); title.textContent = job.audio_name;
+        const sub = document.createElement('span');
+        const progress = job.progress || {};
+        sub.textContent = job.status === 'running' ? `${progress.stage || '处理中'}${Number.isFinite(progress.percent) ? ` ${progress.percent}%` : ''}` : `${jobStatusText[job.status] || job.status} · ${job.created_at.slice(0,16).replace('T',' ')}`;
+        b.append(title, sub); b.onclick = () => { activeJob = job.id; renderHistory(); showJob(job); }; row.append(b);
+        if (job.status !== 'running') {
+          const del = document.createElement('button'); del.type = 'button'; del.className = 'delete-job'; del.textContent = '删除'; del.title = '删除任务及本地输出文件';
+          del.onclick = () => deleteJob(job); row.append(del);
+        }
+        history.append(row);
+      }
+    }
+    async function deleteJob(job) {
+      if (!window.confirm(`删除“${job.audio_name}”的任务记录及输出文件？已注册到剪映的草稿不会删除。`)) return;
+      try { await api(`/api/jobs/${job.id}`, {method:'DELETE'}); if (activeJob === job.id) activeJob = null; await refreshJobs(); }
+      catch (e) { error(e.message); }
+    }
+    async function openFolder(job, target='output') {
+      try { await api(`/api/jobs/${job.id}/open`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target})}); }
+      catch (e) { error(e.message); }
+    }
+    function el(tag, className, text) { const x=document.createElement(tag); if(className)x.className=className; if(text!==undefined)x.textContent=text; return x; }
+    function jobViewKey(job) { return JSON.stringify([job.id,job.status,job.progress,job.files,job.log,job.registered_draft]); }
+    async function showJob(job) {
+      if (job.id !== activeJob) return;
+      renderedKey = jobViewKey(job);
+      const detail = $('detail'); detail.replaceChildren();
+      const head = el('div','job-title'), titles = el('div');
+      titles.append(el('h3','',job.audio_name),el('p','',`任务 ${job.id} · ${job.created_at.replace('T',' ')}`));
+      head.append(titles,el('span',`pill ${job.status}`,jobStatusText[job.status] || job.status)); detail.append(head);
+      const metric = el('div','metric'), outputBox = el('div');
+      outputBox.append(el('small','','输出目录'));
+      const pathRow = el('div','path-row'), pathText = el('span','',job.output_dir), open = el('button','open-dir','打开');
+      open.type='button'; open.onclick=()=>openFolder(job); pathRow.append(pathText,open); outputBox.append(pathRow);
+      const kindBox=el('div'); kindBox.append(el('small','','输出方式'),el('span','',job.options.output || 'mp4'));
+      metric.append(outputBox,kindBox); detail.append(metric);
+      if (job.status === 'running') {
+        const info=job.progress || {}, progressBox=el('div','progress-box');
+        const label=el('div','progress-label'); label.append(el('span','',info.stage || '处理中'),el('span','',Number.isFinite(info.percent) ? `${info.percent}%` : '请稍候'));
+        const bar=document.createElement('progress'); bar.max=100; if(Number.isFinite(info.percent)) bar.value=info.percent;
+        progressBox.append(label,bar); detail.append(progressBox);
+        const cancel=el('button','cancel','取消任务'); cancel.onclick=async()=>{try{await api(`/api/jobs/${job.id}/cancel`,{method:'POST'});await refreshJobs();}catch(e){error(e.message)}}; detail.append(cancel);
+      }
+      if(job.registered_draft){
+        const row=el('div','registered-row'), note=el('p','hint',`已注册到剪映：${job.registered_draft}`), openDraft=el('button','open-dir','打开');
+        openDraft.type='button'; openDraft.onclick=()=>openFolder(job,'registered'); row.append(note,openDraft); detail.append(row);
+      } else if(job.status==='completed' && job.files.includes('jianying_draft_path.txt')) {
+        const register=el('button','ghost','注册此草稿到剪映'); register.type='button'; register.disabled=!jianyingSupported;
+        register.title=jianyingSupported?'':'当前剪映版本不支持明文草稿注册';
+        register.onclick=async()=>{register.disabled=true;try{await api(`/api/jobs/${job.id}/register`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({draft_root:$('jianying-drafts-dir').value.trim()})});await refreshJobs();}catch(e){error(e.message);register.disabled=false;}};
+        detail.append(register);
+      }
+      detail.append(el('h4','','运行日志'),el('pre','log',job.log || (job.status==='running'?'任务正在启动…':'暂无日志')));
+      if(job.files.length){detail.append(el('h4','','输出文件'));const files=el('div','files');for(const name of job.files){if(name==='run.log')continue;const a=el('a','file-link',name);a.href=fileUrl(job.id,name);a.target='_blank';a.rel='noopener';files.append(a);}detail.append(files);}
+      if(job.files.includes('video.mp4')){detail.append(el('h4','','视频预览'));const video=el('video','video');video.controls=true;video.src=fileUrl(job.id,'video.mp4');detail.append(video);}
+      if(job.files.includes('transcript.txt')){detail.append(el('h4','','文字预览'));const preview=el('div','preview','正在读取…');detail.append(preview);try{const r=await fetch(fileUrl(job.id,'transcript.txt'));if(job.id===activeJob)preview.textContent=await r.text();}catch{preview.textContent='预览读取失败';}}
+    }
+    async function refreshJobs() { try { const data=await api('/api/jobs'); jobs=data.jobs; if(!activeJob && jobs.length)activeJob=jobs[0].id; renderHistory(); const current=jobs.find(j=>j.id===activeJob); if(current && jobViewKey(current)!==renderedKey)showJob(current); else if(!current){renderedKey='';$('detail').replaceChildren(el('div','empty','暂无任务'));} } catch(e){error(e.message);} }
+    $('refresh-audio').onclick=()=>loadAudio().catch(e=>error(e.message));
+    $('refresh-models').onclick=()=>loadModels(true);
+    $('jianying-drafts-dir').addEventListener('change',checkJianying);
+    $('upload-file').onchange=async event=>{
+      const file=event.target.files[0]; if(!file)return; error('');
+      $('upload-progress').classList.remove('hidden'); $('upload-percent').textContent='上传中 0%'; $('upload-bar').value=0;
+      try {
+        const result=await new Promise((resolve,reject)=>{
+          const xhr=new XMLHttpRequest(); xhr.open('POST','/api/upload');
+          xhr.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.round(e.loaded/e.total*100);$('upload-bar').value=percent;$('upload-percent').textContent=`上传中 ${percent}%`;}};
+          xhr.onerror=()=>reject(new Error('上传失败，请检查网络连接'));
+          xhr.onload=()=>{let data;try{data=JSON.parse(xhr.responseText);}catch{reject(new Error(`上传接口返回了无效响应（HTTP ${xhr.status}）`));return;}xhr.status>=200&&xhr.status<300?resolve(data):reject(new Error(data.error||`上传失败 ${xhr.status}`));};
+          const form=new FormData();form.append('file',file);xhr.send(form);
+        });
+        await loadAudio(result.id); $('upload-label').textContent=`已上传：${result.name}`;
+      }catch(e){$('upload-label').textContent='上传失败';error(e.message);}
+      finally{$('upload-progress').classList.add('hidden');}
+    };
+    for(const id of ['scene-mode','generate-images','quick-test'])$(id).addEventListener('change',updateFields);
+    document.querySelectorAll('input[name="output"]').forEach(x=>x.addEventListener('change',updateFields));
+    $('job-form').onsubmit=async event=>{event.preventDefault();error('');const data={audio_id:$('audio-id').value,output:selectedOutput(),scene_mode:$('scene-mode').value,scene_seconds:$('scene-seconds').value,whisper_model:$('whisper-model').value,language:$('language').value,transcript_json:$('transcript-json').value.trim(),max_seconds:$('quick-test').checked?$('max-seconds').value:null,generate_images:$('generate-images').checked,llm_base_url:$('llm-base-url').value.trim(),llm_model:$('llm-model').value.trim(),llm_api_key:$('llm-api-key').value,visual_style:$('visual-style').value.trim(),drawthings_model:$('drawthings-model').value.trim(),image_steps:$('image-steps').value,jianying_drafts_dir:$('jianying-drafts-dir').value.trim(),register_jianying:$('register-jianying').checked,draft_name:$('draft-name').value.trim(),width:$('width').value,height:$('height').value,fps:$('fps').value};$('start').disabled=true;try{const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});activeJob=job.id;$('llm-api-key').value='';await refreshJobs();}catch(e){error(e.message);}finally{$('start').disabled=false;}};
+    updateFields();checkJianying();loadAudio().catch(e=>error(e.message));refreshJobs();setInterval(refreshJobs,2500);
+  </script>
+</body>
+</html>
