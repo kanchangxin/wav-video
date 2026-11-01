@@ -53,6 +53,45 @@ class CharacterStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.approve(profile["id"], "three_quarter")
 
+    def test_changing_profile_model_controls_next_generation(self):
+        profile = self.store.create("高欢", "characters/gaohuan", "first.ckpt", 271829, "portrait")
+        updated = self.store.update_model(profile["id"], "second.ckpt")
+        self.assertEqual(updated["model"], "second.ckpt")
+        used = []
+        def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+            used.append(model)
+            path.write_bytes(b"image")
+        with patch("character_profiles.generate_image", side_effect=fake_generate):
+            self.store.generate_preview(profile["id"], "front", "portrait")
+        self.assertEqual(used, ["second.ckpt"])
+
+    def test_delete_archives_only_selected_profile_and_rejects_active_generation(self):
+        first = self.store.create("高欢", "characters/gaohuan", "first.ckpt", 271829, "portrait")
+        second = self.store.create("陈霸先", "characters/chen", "first.ckpt", 271829, "portrait")
+        folder = self.root / "characters" / first["id"]
+        (folder / "front.png").write_bytes(b"image")
+        manifest = self.store.get(first["id"])
+        manifest["generation"] = {"view": "front", "status": "running", "percent": 1}
+        self.store._save(manifest)
+        with self.assertRaisesRegex(ValueError, "正在生图"):
+            self.store.delete(first["id"])
+        manifest["generation"] = None
+        self.store._save(manifest)
+        archived = self.store.delete(first["id"])
+        self.assertFalse(folder.exists())
+        self.assertTrue((archived / "front.png").is_file())
+        self.assertEqual([item["id"] for item in self.store.list()], [second["id"]])
+
+    def test_delete_rejects_archive_symlink_outside_project(self):
+        profile = self.store.create("高欢", "characters/gaohuan", "first.ckpt", 271829, "portrait")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.store.characters / ".deleted").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "归档目录"):
+            self.store.delete(profile["id"])
+        self.assertTrue((self.store.characters / profile["id"] / "profile.json").is_file())
+        self.assertEqual(list(outside.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

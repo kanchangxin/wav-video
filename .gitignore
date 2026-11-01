@@ -29,3 +29,4 @@ characters/*/draft_*.png
 characters/*/profile.json.tmp
 characters/*/upload_*
 characters/*/import_*.png
+characters/.deleted/

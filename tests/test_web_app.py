@@ -118,8 +118,7 @@ class WebAppTests(unittest.TestCase):
                 "character_profile_id": profile["id"], "image_seed": 271829,
                 "image_prompt_suffix": "cinematic light",
             }, self.root / "runs" / "character-test")
-            with self.assertRaisesRegex(ValueError, "模型"):
-                manager._command({
+            different_command, _, _ = manager._command({
                     "audio_id": "root:中文旁白.m4a", "output": "assets", "scene_mode": "fixed",
                     "generate_images": True, "drawthings_model": "z_image.ckpt",
                     "character_profile_id": profile["id"],
@@ -128,6 +127,24 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(command[command.index("--character-profile") + 1], str(folder.resolve()))
         self.assertEqual(command[command.index("--image-seed") + 1], "271829")
         self.assertEqual(command[command.index("--image-prompt-suffix") + 1], "cinematic light")
+        self.assertEqual(different_command[different_command.index("--drawthings-model") + 1], "z_image.ckpt")
+
+    def test_profile_model_can_be_changed_and_profile_can_be_deleted(self):
+        models = [{"id": "flux.ckpt", "name": "FLUX"}, {"id": "z_image.ckpt", "name": "Z Image"}]
+        with patch("web_app.list_models", return_value=models):
+            created = self.client.post("/api/characters", json={
+                "name": "高欢", "path": "characters/gaohuan", "model": "flux.ckpt", "front_prompt": "portrait",
+            }).get_json()
+            changed = self.client.patch("/api/characters/gaohuan", json={"model": "z_image.ckpt"})
+            self.assertEqual(changed.status_code, 200)
+            self.assertEqual(self.client.get("/api/characters/gaohuan").get_json()["model"], "z_image.ckpt")
+            invalid = self.client.patch("/api/characters/gaohuan", json={"model": "missing.ckpt"})
+            self.assertEqual(invalid.status_code, 400)
+        deleted = self.client.delete("/api/characters/gaohuan")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self.client.get("/api/characters/gaohuan").status_code, 404)
+        self.assertTrue(Path(deleted.get_json()["archived_path"]).is_dir())
+        self.assertEqual(created["id"], "gaohuan")
 
     def test_scene_review_endpoint_validates_and_writes_decision(self):
         manager = self.app.extensions["job_manager"]

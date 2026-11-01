@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 from typing import BinaryIO
 
@@ -79,6 +80,31 @@ class CharacterStore:
                 except (ValueError, OSError, KeyError):
                     continue
         return result
+
+    def update_model(self, profile_id: str, model: str) -> dict:
+        model = model.strip()
+        if not model:
+            raise ValueError("请选择已下载的 Draw Things 模型")
+        with self.lock:
+            profile = self.get(profile_id)
+            if profile["generation"] and profile["generation"]["status"] in ("queued", "running"):
+                raise ValueError("角色正在生图，请完成后再修改模型")
+            profile["model"] = model
+            self._save(profile)
+            return profile
+
+    def delete(self, profile_id: str) -> Path:
+        with self.lock:
+            profile = self.get(profile_id)
+            if profile["generation"] and profile["generation"]["status"] in ("queued", "running"):
+                raise ValueError("角色正在生图，请完成后再删除")
+            archive_root = self.characters / ".deleted"
+            archive_root.mkdir(exist_ok=True)
+            if archive_root.is_symlink() or archive_root.resolve().parent != self.characters.resolve():
+                raise ValueError("角色归档目录必须位于 characters 目录内")
+            archived = archive_root / f"{profile_id}-{uuid.uuid4().hex[:8]}"
+            self._folder(profile_id).rename(archived)
+            return archived
 
     def suggested_prompt(self, profile_id: str, view: str) -> str:
         profile = self.get(profile_id)

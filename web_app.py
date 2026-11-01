@@ -174,8 +174,6 @@ class JobManager:
                 raise ValueError(f"无法读取 Draw Things 本地模型：{exc}") from exc
             if selected_model not in available:
                 raise ValueError("请选择本机已下载的 Draw Things 模型")
-            if profile_id and selected_model != profile["model"]:
-                raise ValueError("场景生图模型须与角色档案的模型一致")
         for key, flag in (("llm_base_url", "--llm-base-url"), ("llm_model", "--llm-model"),
                           ("visual_style", "--visual-style"),
                           ("drawthings_model", "--drawthings-model"),
@@ -408,6 +406,37 @@ def create_app(project_root: Path | None = None) -> Flask:
             return jsonify(profile)
         except (KeyError, ValueError):
             return jsonify(error="角色档案不存在"), 404
+
+    @app.patch("/api/characters/<profile_id>")
+    def update_character(profile_id: str):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(error="请提交 JSON 配置"), 400
+        try:
+            model = str(data.get("model") or "").strip()
+            if model not in {item["id"] for item in list_models()}:
+                raise ValueError("请选择本机已下载的 Draw Things 模型")
+            return jsonify(manager.characters.update_model(profile_id, model))
+        except KeyError:
+            return jsonify(error="角色档案不存在"), 404
+        except (TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.delete("/api/characters/<profile_id>")
+    def delete_character(profile_id: str):
+        with manager.lock:
+            active = any(job.get("status") == "running" and
+                         job.get("options", {}).get("character_profile_id") == profile_id
+                         for job in manager.jobs.values())
+        if active:
+            return jsonify(error="已有运行中的任务使用此角色档案，请先等待任务结束"), 400
+        try:
+            archived = manager.characters.delete(profile_id)
+            return jsonify(deleted=True, archived_path=str(archived))
+        except KeyError:
+            return jsonify(error="角色档案不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
 
     @app.post("/api/characters/<profile_id>/generate")
     def generate_character(profile_id: str):
