@@ -15,12 +15,12 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from drawthings_cli import generate_image
-from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for
+from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for, normalize_effects
 
 
 @dataclass
@@ -41,6 +41,8 @@ class Scene:
     background: str | None = None
     foreground: str | None = None
     motion_reason: str = ""
+    motion_effects: dict[str, str] = field(default_factory=dict)
+    foreground_effects: dict[str, str] = field(default_factory=dict)
 
 
 def compose_scene_prompt(prompt: str, suffix: str, character_name: str,
@@ -486,6 +488,43 @@ def recommend_scene_motions(scenes: list[Scene], base_url: str, model: str, api_
                 trace(f"场景 {index} 运镜：{scene.motion}；原因：{scene.motion_reason}\n")
 
 
+def recommend_character_presence(scenes: list[Scene], base_url: str, model: str,
+                                 api_key: str | None, character_name: str,
+                                 trace: Callable[[str], None] | None = None) -> None:
+    """Classify fixed-duration scenes without changing their time boundaries."""
+    endpoint = base_url.rstrip("/") + "/chat/completions"
+    instruction = (f"判断故事主角「{character_name}」是否应出现在每段画面中。"
+                   "只根据该段旁白与画面内容判断，无法确定时返回 false。"
+                   '只返回 JSON：{"presence":[{"index":0,"present":false}]}，索引从 0 连续。')
+    for batch_number, start in enumerate(range(0, len(scenes), 12), 1):
+        batch = scenes[start:start + 12]
+        entries = [{"index": i, "prompt": scene.prompt[:500]} for i, scene in enumerate(batch)]
+        payload = {"model": model, "temperature": 0.1, "messages": [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": json.dumps(entries, ensure_ascii=False)}]}
+        if trace:
+            trace(f"=== 第 {batch_number} 批主角出镜判断输入 ===\n{json.dumps(payload, ensure_ascii=False)}\n")
+        try:
+            response = post_json(endpoint, payload, api_key, timeout=180)
+            content = response["choices"][0]["message"]["content"]
+            if trace:
+                trace(f"=== 第 {batch_number} 批主角出镜判断输出 ===\n{content}\n")
+            cleaned = re.sub(r"<think>.*?</think>", "", content.strip(), flags=re.S | re.I).strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I)
+            items = json.loads(cleaned)["presence"]
+            if not isinstance(items, list) or len(items) != len(batch):
+                raise ValueError("出镜判断数量不匹配")
+            for index, item in enumerate(items):
+                if item.get("index") != index or not isinstance(item.get("present"), bool):
+                    raise ValueError("出镜判断索引或数值无效")
+            for scene, item in zip(batch, items):
+                scene.character_present = item["present"]
+        except (RuntimeError, ValueError, KeyError, TypeError, IndexError) as exc:
+            if trace:
+                trace(f"第 {batch_number} 批主角出镜判断失败，默认不出镜：{exc}\n")
+
+
 def write_progress(output: Path, stage: str, percent: int | None) -> None:
     """Publish progress atomically for the web UI."""
     temp = output / "progress.json.tmp"
@@ -539,7 +578,7 @@ def prepare_motion_backgrounds(scenes: list[Scene], output: Path, width: int, he
         if not source or not Path(source).is_file():
             result.append(black)
             continue
-        canvas_width, canvas_height = generation_size(width, height, scene.motion)
+        canvas_width, canvas_height = generation_size(width, height, scene.motion, scene.motion_effects)
         normalized = output / f"background_{i:03}.png"
         run(["ffmpeg", "-y", "-v", "error", "-i", str(Path(source).resolve()), "-vf",
              f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=increase,"
@@ -552,21 +591,57 @@ def render_motion_clip(image: Path, foreground: Path | None, scene: Scene, outpu
                        width: int, height: int, fps: int, frame_count: int) -> None:
     """Render one scene from the same linear keyframes used by the draft."""
     end_frame = max(1, frame_count - 1)
-    motion = motion_for(scene.motion)
+    motion = motion_for(scene.motion, scene.motion_effects)
     progress = f"on/{end_frame}"
     zoom = f"({motion.scale_start}+({motion.scale_end - motion.scale_start})*{progress})"
     x_position = f"({motion.x_start}+({motion.x_end - motion.x_start})*{progress})"
+    y_position = f"({motion.y_start}+({motion.y_end - motion.y_start})*{progress})"
     crop_x = f"(iw-iw/zoom)/2-({x_position})*iw/zoom"
-    filter_graph = (f"[0:v]zoompan=z='{zoom}':x='{crop_x}':y='(ih-ih/zoom)/2':"
+    crop_y = f"(ih-ih/zoom)/2+({y_position})*ih/zoom"
+    filter_graph = (f"[0:v]zoompan=z='{zoom}':x='{crop_x}':y='{crop_y}':"
                     f"d=1:s={width}x{height}:fps={fps},format=yuv420p[background]")
     command = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-i", str(image)]
     last_label = "background"
     if foreground is not None:
+        if motion.fade != "none":
+            duration = frame_count / fps
+            fade_duration = min(0.5, duration / 3)
+            fades = []
+            if motion.fade in ("in", "in_out"):
+                fades.append(f"fade=t=in:st=0:d={fade_duration}")
+            if motion.fade in ("out", "in_out"):
+                fades.append(f"fade=t=out:st={max(0, duration - fade_duration)}:d={fade_duration}")
+            filter_graph += f";[background]{','.join(fades)}[faded_background]"
+            last_label = "faded_background"
         command += ["-loop", "1", "-framerate", str(fps), "-i", str(foreground)]
-        fg_x = (f"{width}*({motion.foreground_x_start}+"
-                f"({motion.foreground_x_end - motion.foreground_x_start})*n/{end_frame})")
-        filter_graph += f";[1:v]format=rgba[person];[background][person]overlay=x='{fg_x}':y=0:eval=frame:format=auto[composed]"
+        fg_motion = motion_for("static", scene.foreground_effects)
+        fg_x = (f"(W-w)/2+W*({motion.foreground_x_start + fg_motion.x_start}+"
+                f"({motion.foreground_x_end - motion.foreground_x_start + fg_motion.x_end - fg_motion.x_start})*n/{end_frame})")
+        fg_y = (f"(H-h)/2-H*({fg_motion.y_start}+({fg_motion.y_end - fg_motion.y_start})*n/{end_frame})")
+        fg_scale = (f"({fg_motion.scale_start}+"
+                    f"({fg_motion.scale_end - fg_motion.scale_start})*n/{end_frame})")
+        fg_filter = (f"format=rgba,scale=w='iw*{fg_scale}':h='ih*{fg_scale}':eval=frame,format=rgba"
+                     if fg_motion.scale_start != 1.0 or fg_motion.scale_end != 1.0 else "format=rgba")
+        fg_fade = fg_motion.fade if fg_motion.fade != "none" else motion.fade
+        if fg_fade != "none":
+            duration = frame_count / fps
+            fade_duration = min(0.5, duration / 3)
+            if fg_fade in ("in", "in_out"):
+                fg_filter += f",fade=t=in:st=0:d={fade_duration}:alpha=1"
+            if fg_fade in ("out", "in_out"):
+                fg_filter += f",fade=t=out:st={max(0, duration - fade_duration)}:d={fade_duration}:alpha=1"
+        filter_graph += f";[1:v]{fg_filter}[person];[{last_label}][person]overlay=x='{fg_x}':y='{fg_y}':eval=frame:format=auto[composed]"
         last_label = "composed"
+    if motion.fade != "none" and foreground is None:
+        duration = frame_count / fps
+        fade_duration = min(0.5, duration / 3)
+        fades = []
+        if motion.fade in ("in", "in_out"):
+            fades.append(f"fade=t=in:st=0:d={fade_duration}")
+        if motion.fade in ("out", "in_out"):
+            fades.append(f"fade=t=out:st={max(0, duration - fade_duration)}:d={fade_duration}")
+        filter_graph += f";[{last_label}]{','.join(fades)}[faded]"
+        last_label = "faded"
     command += ["-filter_complex", filter_graph, "-map", f"[{last_label}]", "-frames:v", str(frame_count),
                 "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output)]
     run(command)
@@ -579,7 +654,7 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="avrender-") as tmp:
         work = Path(tmp)
-        if any(scene.motion != "static" for scene in scenes):
+        if any(scene.motion != "static" or scene.motion_effects for scene in scenes):
             backgrounds = prepare_motion_backgrounds(scenes, work / "images", width, height)
             foregrounds = prepare_foregrounds(scenes, work / "foregrounds", width, height)
             images = []
@@ -594,7 +669,7 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
             images = prepare_images(scenes, work / "images", width, height)
         concat = work / "frames.ffconcat"
         lines = ["ffconcat version 1.0"]
-        if any(scene.motion != "static" for scene in scenes):
+        if any(scene.motion != "static" or scene.motion_effects for scene in scenes):
             lines += [f"file '{_ffconcat_path(image)}'" for image in images]
         else:
             for scene, image in zip(scenes, images):
@@ -618,7 +693,7 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
                     if line.startswith("out_time_us="):
                         try:
                             progress(0.8 + 0.2 * min(1.0, float(line.split("=", 1)[1]) / 1_000_000 / scenes[-1].end)
-                                     if any(scene.motion != "static" for scene in scenes) else
+                                     if any(scene.motion != "static" or scene.motion_effects for scene in scenes) else
                                      min(1.0, float(line.split("=", 1)[1]) / 1_000_000 / scenes[-1].end))
                         except ValueError:
                             pass
@@ -626,6 +701,19 @@ def render_mp4(audio: Path, scenes: list[Scene], srt: Path, output: Path, width:
                         progress(1.0)
                 if process.wait() != 0:
                     raise RuntimeError(f"视频合成失败：{' '.join(recent)[-500:]}")
+
+
+def fade_keyframes(segment, draft, fade: str, end_us: int) -> None:
+    if fade == "none":
+        return
+    ramp = min(500_000, max(1, end_us // 3))
+    points = []
+    if fade in ("in", "in_out"):
+        points.extend([(0, 0.0), (ramp, 1.0)])
+    if fade in ("out", "in_out"):
+        points.extend([(end_us - ramp, 1.0), (end_us, 0.0)])
+    for offset, alpha in points:
+        segment.add_keyframe(draft.KeyframeProperty.alpha, offset, alpha)
 
 
 def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, width: int, height: int) -> Path:
@@ -642,7 +730,7 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
     audio_copy = media / audio.name
     if audio.resolve() != audio_copy.resolve():
         shutil.copy2(audio, audio_copy)
-    moving = any(scene.motion != "static" for scene in scenes)
+    moving = any(scene.motion != "static" or scene.motion_effects for scene in scenes)
     prepared = (prepare_motion_backgrounds(scenes, media / "prepared", width, height) if moving else
                 prepare_images(scenes, media / "prepared", width, height))
     foregrounds = prepare_foregrounds(scenes, media / "foregrounds", width, height) if moving else [None] * len(scenes)
@@ -653,20 +741,30 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
     script.append_tracks(tracks)
     for scene, image, foreground in zip(scenes, prepared, foregrounds):
         segment = draft.VideoSegment(str(image), draft.trange_seconds(scene.start, end=scene.end))
-        if scene.motion != "static":
-            motion = motion_for(scene.motion)
+        if scene.motion != "static" or scene.motion_effects:
+            motion = motion_for(scene.motion, scene.motion_effects)
             end_us = round((scene.end - scene.start) * 1_000_000)
-            for offset, scale, x in ((0, motion.scale_start, motion.x_start),
-                                     (end_us, motion.scale_end, motion.x_end)):
+            for offset, scale, x, y in ((0, motion.scale_start, motion.x_start, motion.y_start),
+                                        (end_us, motion.scale_end, motion.x_end, motion.y_end)):
                 segment.add_keyframe(draft.KeyframeProperty.uniform_scale, offset, scale)
                 segment.add_keyframe(draft.KeyframeProperty.position_x, offset, x)
+                segment.add_keyframe(draft.KeyframeProperty.position_y, offset, y)
+            fade_keyframes(segment, draft, motion.fade, end_us)
         script.add_segment(segment, track="visual")
         if foreground is not None:
             person = draft.VideoSegment(str(foreground), draft.trange_seconds(scene.start, end=scene.end))
-            motion = motion_for(scene.motion)
+            motion = motion_for(scene.motion, scene.motion_effects)
+            fg_motion = motion_for("static", scene.foreground_effects)
             end_us = round((scene.end - scene.start) * 1_000_000)
-            person.add_keyframe(draft.KeyframeProperty.position_x, 0, motion.foreground_x_start)
-            person.add_keyframe(draft.KeyframeProperty.position_x, end_us, motion.foreground_x_end)
+            for offset, fraction in ((0, 0), (end_us, 1)):
+                x = (motion.foreground_x_start + (motion.foreground_x_end - motion.foreground_x_start) * fraction
+                     + fg_motion.x_start + (fg_motion.x_end - fg_motion.x_start) * fraction)
+                person.add_keyframe(draft.KeyframeProperty.position_x, offset, x)
+                person.add_keyframe(draft.KeyframeProperty.position_y, offset,
+                                    fg_motion.y_start + (fg_motion.y_end - fg_motion.y_start) * fraction)
+                person.add_keyframe(draft.KeyframeProperty.uniform_scale, offset,
+                                    fg_motion.scale_start + (fg_motion.scale_end - fg_motion.scale_start) * fraction)
+            fade_keyframes(person, draft, fg_motion.fade if fg_motion.fade != "none" else motion.fade, end_us)
             script.add_segment(person, track="foreground")
     audio_material = draft.AudioMaterial(str(audio_copy))
     audio_end_us = min(round(scenes[-1].end * 1_000_000), audio_material.duration)
@@ -689,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scene-seconds", type=float, default=25.0)
     parser.add_argument("--motion-preset", choices=sorted(PRESETS), default="static",
                         help="镜头动效：静止、大模型逐场景推荐、推拉、平移或分层视差")
+    parser.add_argument("--motion-effects", default="{}", help="组合动效 JSON：fade、horizontal、vertical、zoom")
     parser.add_argument("--visual-style", default=os.getenv("VISUAL_STYLE", ""), help="LLM 场景分析使用的全局画面设定")
     parser.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"))
     parser.add_argument("--llm-model", default=os.getenv("LLM_MODEL", ""))
@@ -700,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--image-seed", type=int, default=271829, help="场景生图使用的固定 seed，默认 271829")
     parser.add_argument("--image-prompt-suffix", default="", help="附加到每个场景生图提示词末尾的固定文本")
     parser.add_argument("--character-profile", type=Path, help="已确认的单主角角色档案目录")
-    parser.add_argument("--review-scenes", action="store_true", help="场景分析后等待页面确认主角出镜标记")
+    parser.add_argument("--review-scenes", action="store_true", help="已停用，仅为兼容旧命令保留")
     parser.add_argument("--max-seconds", type=float, help="只处理音频前 N 秒，用于快速试运行")
     parser.add_argument("--jianying-drafts-dir", type=Path, help="注册时使用的剪映草稿根目录；留空自动读取剪映设置")
     parser.add_argument("--register-jianying", action="store_true", help="将兼容格式的草稿登记到剪映首页")
@@ -721,8 +820,6 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("试运行秒数必须大于零")
         if not 0 <= args.image_seed <= 4294967295:
             raise ValueError("生图 seed 须在 0 到 4294967295 之间")
-        if args.review_scenes and not args.character_profile:
-            raise ValueError("场景确认需要选择角色档案")
         if args.generate_images and args.scene_mode == "none":
             raise ValueError("生图需要 --scene-mode fixed 或 llm")
         if args.motion_preset == "parallax" and (not args.generate_images or not args.character_profile):
@@ -764,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
         (output / "transcript.txt").write_text("".join(c.text for c in captions), encoding="utf-8")
         write_progress(output, "分析场景", 64)
         record_llm_trace = None
-        if args.scene_mode == "llm" or args.motion_preset == "auto":
+        if args.scene_mode == "llm" or args.motion_preset == "auto" or (args.scene_mode == "fixed" and args.llm_model and character_name):
             trace_path = output / "llm_trace.log"
             trace_path.write_text("", encoding="utf-8")
 
@@ -784,11 +881,12 @@ def main(argv: list[str] | None = None) -> int:
                                     protagonist_name=character_name)
         for scene, prompt in zip(scenes, simplify_texts([scene.prompt for scene in scenes])):
             scene.prompt = prompt
+        if args.scene_mode == "fixed" and args.llm_model and character_name:
+            recommend_character_presence(scenes, args.llm_base_url, args.llm_model,
+                                         args.llm_api_key, character_name, record_llm_trace)
         if args.review_scenes:
-            if args.scene_mode == "fixed":
-                for scene in scenes:
-                    scene.character_present = True
-            review_scenes(scenes, output, character_name)
+            print("提示：出镜确认参数已停用；固定分段无 LLM 时默认主角不出镜。", flush=True)
+        selected_effects = normalize_effects(json.loads(args.motion_effects)) if args.scene_mode != "none" else {}
         if args.motion_preset == "auto":
             write_progress(output, "推荐场景运镜", 65)
             recommend_scene_motions(scenes, args.llm_base_url, args.llm_model, args.llm_api_key,
@@ -796,6 +894,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for i, scene in enumerate(scenes):
                 scene.motion = choose_preset(args.motion_preset, i, scene.character_present)
+        for scene in scenes:
+            scene.motion_effects = selected_effects.copy()
+            if scene.motion == "parallax":
+                scene.foreground_effects = {key: value for key, value in selected_effects.items() if key != "fade"}
         for i, scene in enumerate(scenes, 1):
             print(f"场景 {i} [{scene.start:.2f}s - {scene.end:.2f}s] 提示词：{scene.prompt}\n"
                   f"场景 {i} 运镜：{scene.motion}；原因：{scene.motion_reason}", flush=True)
@@ -809,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
             references = character_references if scene.character_present else []
             final_prompt = compose_scene_prompt(scene.prompt, args.image_prompt_suffix, character_name,
                                                 scene.character_present, bool(references))
-            image_width, image_height = generation_size(args.width, args.height, scene.motion)
+            image_width, image_height = generation_size(args.width, args.height, scene.motion, scene.motion_effects)
             if scene.motion == "parallax" and scene.character_present:
                 image_width, image_height = args.width, args.height
             fingerprint = image_request_fingerprint(final_prompt, args.drawthings_model or "", image_width,
@@ -861,7 +963,10 @@ def main(argv: list[str] | None = None) -> int:
                                                                                65 + round(((i - 1) + 0.5 + percent / 200) / len(scenes) * 20)))
                         pending_background.replace(background)
                         background_metadata.write_text(json.dumps({"fingerprint": background_fingerprint,
-                                                                   "prompt": background_prompt}, ensure_ascii=False,
+                                                                   "prompt": background_prompt,
+                                                                   "model": args.drawthings_model, "width": background_width,
+                                                                   "height": background_height, "steps": args.image_steps,
+                                                                   "seed": args.image_seed, "references": []}, ensure_ascii=False,
                                                                   indent=2), encoding="utf-8")
                     if not foreground.is_file() or foreground.stat().st_mtime < Path(scene.image).stat().st_mtime:
                         cutout = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
@@ -876,8 +981,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"警告：第 {i} 段分层素材失败，改用单图动效：{exc}", file=sys.stderr)
             if scene.motion == "parallax" and not scene.foreground:
                 scene.motion = choose_preset("parallax", i - 1, False)
-            if not scene.image and scene.motion != "static":
+            if not scene.image and (scene.motion != "static" or scene.motion_effects):
                 scene.motion = "static"
+                scene.motion_effects = {}
                 scene.motion_reason = "无图片可供运镜，使用黑色静止画面"
                 print(f"场景 {i} 无图片可供运镜，改用黑色静止画面。", flush=True)
             record["motion"] = scene.motion

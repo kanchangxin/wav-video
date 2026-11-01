@@ -8,8 +8,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts, compose_scene_prompt, image_request_fingerprint, review_scenes, validate_foreground, recommend_scene_motions
-from scene_motion import choose_preset, motion_for, generation_size
+from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts, compose_scene_prompt, image_request_fingerprint, review_scenes, validate_foreground, recommend_scene_motions, recommend_character_presence
+from scene_motion import choose_preset, motion_for, generation_size, normalize_effects
 
 
 class TimelineTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class TimelineTests(unittest.TestCase):
             self.assertEqual([(s.prompt, s.character_present) for s in reviewed],
                              [("hero in city", True), ("empty road", False)])
 
-    def test_pipeline_sends_reference_only_for_confirmed_protagonist_scene(self):
+    def test_fixed_scenes_without_llm_do_not_show_protagonist_or_pause(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audio = root / "voice.m4a"
@@ -72,35 +72,51 @@ class TimelineTests(unittest.TestCase):
                 "front": {"status": "approved"}, "three_quarter": {"status": "empty"},
                 "full_body": {"status": "empty"}}}), encoding="utf-8")
             output = root / "out"
-            import threading
-            def confirm():
-                import time
-                for _ in range(100):
-                    if (output / "scenes_draft.json").is_file():
-                        break
-                    time.sleep(0.01)
-                (output / "scene_review.json").write_text(json.dumps({"scenes": [
-                    {"prompt": "hero scene", "character_present": True},
-                    {"prompt": "empty street", "character_present": False},
-                ]}))
             calls = []
             def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
                 calls.append((prompt, kwargs["references"], kwargs["seed"]))
                 path.write_bytes(b"generated")
-            worker = threading.Thread(target=confirm)
-            worker.start()
             with patch("audio_video.generate_image", side_effect=fake_generate):
                 result = main([str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
                                "--output", "assets", "--scene-mode", "fixed", "--scene-seconds", "1",
                                "--generate-images", "--drawthings-model", "flux.ckpt", "--character-profile", str(profile),
-                               "--review-scenes", "--image-prompt-suffix", "cinematic light"])
-            worker.join()
+                               "--image-prompt-suffix", "cinematic light"])
             self.assertEqual(result, 0)
             self.assertEqual(len(calls), 2)
-            self.assertEqual([len(call[1]) for call in calls], [1, 0])
-            self.assertIn("identity reference", calls[0][0])
+            self.assertEqual([len(call[1]) for call in calls], [0, 0])
+            self.assertNotIn("identity reference", calls[0][0])
             self.assertNotIn("identity reference", calls[1][0])
             self.assertTrue(all(call[0].endswith("cinematic light") and call[2] == 271829 for call in calls))
+            self.assertFalse((output / "scenes_draft.json").exists())
+
+    def test_fixed_scenes_with_llm_apply_automatic_presence_before_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([{"start": 0, "end": 1, "text": "主角出场"}], ensure_ascii=False))
+            profile = root / "profile"
+            profile.mkdir()
+            (profile / "front.png").write_bytes(b"reference")
+            (profile / "profile.json").write_text(json.dumps({"name": "主角", "views": {
+                "front": {"status": "approved"}, "three_quarter": {"status": "empty"},
+                "full_body": {"status": "empty"}}}))
+            answer = {"choices": [{"message": {"content": '{"presence":[{"index":0,"present":true}]}'}}]}
+            calls = []
+            def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+                calls.append(kwargs.get("references", []))
+                path.write_bytes(b"image")
+            output = root / "out"
+            with patch("audio_video.post_json", return_value=answer), \
+                 patch("audio_video.generate_image", side_effect=fake_generate):
+                result = main([str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
+                               "--output", "assets", "--scene-mode", "fixed", "--llm-model", "model",
+                               "--generate-images", "--drawthings-model", "test.ckpt", "--character-profile", str(profile)])
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls[0]), 1)
+            self.assertTrue(json.loads((output / "scenes.json").read_text())[0]["character_present"])
 
     def test_changed_seed_regenerates_existing_scene_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -253,6 +269,47 @@ class TimelineTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
+    def test_fixed_scene_character_presence_uses_llm_when_configured(self):
+        scenes = [Scene(0, 10, "a general enters"), Scene(10, 20, "empty street")]
+        answer = {"choices": [{"message": {"content": '{"presence":[{"index":0,"present":true},{"index":1,"present":false}]}'}}]}
+        with patch("audio_video.post_json", return_value=answer):
+            recommend_character_presence(scenes, "http://localhost:1234/v1", "model", None, "高欢")
+        self.assertEqual([s.character_present for s in scenes], [True, False])
+
+    def test_combined_motion_effects_have_independent_axes(self):
+        effects = normalize_effects({"fade": "in_out", "horizontal": "left", "vertical": "up", "zoom": "out"})
+        motion = motion_for("static", effects)
+        self.assertLess(motion.x_end, motion.x_start)
+        self.assertGreater(motion.y_end, motion.y_start)
+        self.assertGreater(motion.scale_start, motion.scale_end)
+        self.assertEqual(motion.fade, "in_out")
+        with self.assertRaises(ValueError):
+            normalize_effects({"horizontal": "diagonal"})
+        with self.assertRaises(ValueError):
+            normalize_effects({"horizontal": ["left", "right"]})
+        self.assertGreater(motion_for("static", {"horizontal": "left"}).scale_start, 1.2)
+        self.assertGreater(motion_for("static", {"vertical": "up"}).scale_end, 1.2)
+        self.assertGreater(motion_for("static", {"horizontal": "left", "zoom": "out"}).scale_end, 1.2)
+
+    def test_combined_motion_draft_has_vertical_and_alpha_keyframes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                            "-c:a", "aac", str(audio)], check=True)
+            image = root / "scene.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=448x256:d=0.04",
+                            "-frames:v", "1", str(image)], check=True)
+            srt = root / "sub.srt"
+            write_srt([Caption(0, 2, "测试")], srt)
+            scene = Scene(0, 2, "scene", str(image), motion_effects={"fade": "in_out", "vertical": "up"})
+            content = json.loads(export_jianying(audio, [scene], srt, root / "draft", 320, 180).read_text())
+            segment = next(t for t in content["tracks"] if t["name"] == "visual")["segments"][0]
+            props = {p["property_type"]: p["keyframe_list"] for p in segment["common_keyframes"]}
+            self.assertIn("KFTypePositionY", props)
+            self.assertIn("KFTypeAlpha", props)
+            self.assertEqual(props["KFTypeAlpha"][0]["values"], [0.0])
+
     def test_nearly_empty_character_mask_falls_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             mask = Path(tmp) / "empty.png"
@@ -350,7 +407,9 @@ class RenderTests(unittest.TestCase):
                             "-frames:v", "1", str(foreground)], check=True)
             srt = root / "subtitles.srt"
             write_srt([Caption(0, 2, "测试")], srt)
-            scene = Scene(0, 2, "scene", str(background), True, "parallax", str(background), str(foreground))
+            scene = Scene(0, 2, "scene", str(background), True, "parallax", str(background), str(foreground),
+                          motion_effects={"fade": "in_out", "vertical": "up", "zoom": "out"},
+                          foreground_effects={"vertical": "down", "zoom": "in"})
             draft_file = export_jianying(audio, [scene], srt, root / "draft", 320, 180)
             content = json.loads(draft_file.read_text(encoding="utf-8"))
             tracks = {track["name"]: track for track in content["tracks"]}
@@ -360,6 +419,9 @@ class RenderTests(unittest.TestCase):
                 segment = tracks[name]["segments"][0]
                 properties = {item["property_type"]: item["keyframe_list"] for item in segment["common_keyframes"]}
                 self.assertIn("KFTypePositionX", properties)
+                self.assertIn("KFTypePositionY", properties)
+                self.assertIn("KFTypeAlpha", properties)
+                self.assertIn("KFTypeScaleX", properties)
                 self.assertEqual([item["time_offset"] for item in properties["KFTypePositionX"]], [0, 2_000_000])
 
     def test_motion_mp4_renders_background_and_transparent_foreground(self):

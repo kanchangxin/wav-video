@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import fcntl
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ from typing import Callable
 
 
 DEFAULT_CLI = Path(__file__).resolve().parent / "tools" / "drawthings" / "draw-things-cli"
+LOCK_PATH = Path(tempfile.gettempdir()) / "wav-video-drawthings.lock"
 
 
 def cli_path() -> Path:
@@ -81,26 +83,31 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
     last_percent = -1
     timed_out = threading.Event()
     try:
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, bufsize=1) as process:
-            def stop() -> None:
-                timed_out.set()
-                process.kill()
-            timer = threading.Timer(1800, stop)
-            timer.start()
+        with LOCK_PATH.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                for line in process.stdout:
-                    recent.append(line.strip())
-                    recent = recent[-15:]
-                    match = re.search(r"(\d{1,3})\s*%", line)
-                    if match and progress:
-                        current = min(100, int(match.group(1)))
-                        if current > last_percent:
-                            last_percent = current
-                            progress(current)
-                exit_code = process.wait()
+                with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      text=True, bufsize=1) as process:
+                    def stop() -> None:
+                        timed_out.set()
+                        process.kill()
+                    timer = threading.Timer(1800, stop)
+                    timer.start()
+                    try:
+                        for line in process.stdout:
+                            recent.append(line.strip())
+                            recent = recent[-15:]
+                            match = re.search(r"(\d{1,3})\s*%", line)
+                            if match and progress:
+                                current = min(100, int(match.group(1)))
+                                if current > last_percent:
+                                    last_percent = current
+                                    progress(current)
+                        exit_code = process.wait()
+                    finally:
+                        timer.cancel()
             finally:
-                timer.cancel()
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     finally:
         if prepared_reference:
             prepared_reference.unlink(missing_ok=True)

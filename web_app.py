@@ -21,6 +21,8 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from jianying_register import register_draft, registration_status
 from drawthings_cli import list_models
+from scene_motion import normalize_effects
+from scene_editor import SceneEditor
 from character_profiles import CharacterStore, DEFAULT_FRONT_PROMPT, VIEWS
 
 
@@ -127,6 +129,9 @@ class JobManager:
             raise ValueError("动效预设无效")
         if motion_preset == "parallax" and (not generate_images or not profile_id):
             raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
+        motion_effects = normalize_effects(data.get("motion_effects"))
+        if scene_mode == "none":
+            motion_effects = {}
         max_seconds = data.get("max_seconds")
         if max_seconds not in (None, ""):
             max_seconds = number("max_seconds", 30, 1, 3600)
@@ -152,6 +157,8 @@ class JobManager:
                    "--output", output_type, "--scene-mode", scene_mode, "--whisper-model", str(data.get("whisper_model") or "small"),
                    "--language", str(data.get("language", "zh")), "--width", str(width), "--height", str(height), "--fps", str(fps),
                    "--scene-seconds", str(scene_seconds), "--motion-preset", motion_preset]
+        if motion_effects:
+            command += ["--motion-effects", json.dumps(motion_effects, ensure_ascii=False)]
         if image_steps is not None:
             command += ["--image-steps", str(image_steps)]
         if generate_images:
@@ -165,7 +172,7 @@ class JobManager:
                     raise ValueError("角色档案不存在") from exc
                 if profile["views"]["front"]["status"] != "approved" or not self.characters.approved_references(profile_id):
                     raise ValueError("角色档案需要已确认的正面半身标准照")
-                command += ["--character-profile", str(self.characters._folder(profile_id)), "--review-scenes"]
+                command += ["--character-profile", str(self.characters._folder(profile_id))]
         if transcript:
             command += ["--transcript-json", str(transcript_path)]
         if max_seconds is not None:
@@ -335,7 +342,10 @@ class JobManager:
             if self.jobs[job_id].get("registered_draft"):
                 raise ValueError("该草稿已注册到剪映")
         output = self.runs / job_id
-        source = output / "jianying_draft"
+        pointer = output / "jianying_draft_path.txt"
+        source = Path(pointer.read_text(encoding="utf-8").strip()) if pointer.is_file() else output / "jianying_draft"
+        if not source.resolve().is_relative_to(output.resolve()):
+            source = output / "jianying_draft"
         if not (source / "draft_content.json").is_file():
             candidates = [p for p in output.iterdir() if p.is_dir() and (p / "draft_content.json").is_file()]
             if len(candidates) != 1:
@@ -358,6 +368,8 @@ def create_app(project_root: Path | None = None) -> Flask:
     app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
     manager = JobManager(root)
     app.extensions["job_manager"] = manager
+    editor = SceneEditor(manager)
+    app.extensions["scene_editor"] = editor
 
     @app.before_request
     def check_origin():
@@ -383,6 +395,130 @@ def create_app(project_root: Path | None = None) -> Flask:
     @app.get("/characters")
     def character_page():
         return render_template("characters.html", front_prompt=DEFAULT_FRONT_PROMPT)
+
+    @app.get("/jobs/<job_id>/scenes")
+    def scene_editor_page(job_id: str):
+        try:
+            editor._folder(job_id)
+            return render_template("scenes.html", job_id=job_id)
+        except KeyError:
+            return "任务不存在", 404
+        except ValueError as exc:
+            return str(exc), 400
+
+    @app.get("/api/jobs/<job_id>/editor")
+    def scene_editor_inventory(job_id: str):
+        try:
+            return jsonify(editor.inventory(job_id))
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get("/api/jobs/<job_id>/editor/tasks")
+    def scene_editor_tasks(job_id: str):
+        try:
+            return jsonify(editor.tasks(job_id))
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get("/api/jobs/<job_id>/editor/assets/<int:index>/<layer>")
+    def scene_editor_asset(job_id: str, index: int, layer: str):
+        try:
+            path = editor.asset(job_id, index, layer)
+            return send_from_directory(path.parent, path.name, as_attachment=False)
+        except (KeyError, ValueError):
+            return jsonify(error="图片不存在"), 404
+
+    @app.post("/api/jobs/<job_id>/editor/candidates/generate")
+    def scene_editor_generate(job_id: str):
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(editor.generate(job_id, int(data.get("scene")), str(data.get("layer")), str(data.get("command")))), 202
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, TypeError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/jobs/<job_id>/editor/candidates/upload")
+    def scene_editor_upload(job_id: str):
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            return jsonify(error="请选择图片"), 400
+        try:
+            return jsonify(editor.upload(job_id, int(request.form.get("scene")), str(request.form.get("layer")),
+                                         uploaded.stream, uploaded.filename)), 202
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, TypeError, OSError, subprocess.SubprocessError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get("/api/jobs/<job_id>/editor/candidates/<task_id>")
+    def scene_editor_task(job_id: str, task_id: str):
+        try:
+            return jsonify(editor.task(job_id, task_id))
+        except (KeyError, ValueError):
+            return jsonify(error="候选任务不存在"), 404
+
+    @app.get("/api/jobs/<job_id>/editor/candidates/<task_id>/image")
+    def scene_editor_candidate_image(job_id: str, task_id: str):
+        try:
+            task = editor.task(job_id, task_id)
+            path = Path(task["candidate"])
+            if not path.is_file() or not path.resolve().is_relative_to((manager.runs / job_id / "edits" / "candidates").resolve()):
+                raise KeyError(task_id)
+            return send_from_directory(path.parent, path.name, as_attachment=False)
+        except (KeyError, ValueError):
+            return jsonify(error="候选图片不存在"), 404
+
+    @app.post("/api/jobs/<job_id>/editor/candidates/<task_id>/accept")
+    def scene_editor_accept(job_id: str, task_id: str):
+        try:
+            return jsonify(editor.accept(job_id, task_id))
+        except KeyError:
+            return jsonify(error="候选任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/jobs/<job_id>/editor/candidates/<task_id>/discard")
+    def scene_editor_discard(job_id: str, task_id: str):
+        try:
+            return jsonify(editor.discard(job_id, task_id))
+        except KeyError:
+            return jsonify(error="候选任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.patch("/api/jobs/<job_id>/editor/motion/<int:index>/<layer>")
+    def scene_editor_motion(job_id: str, index: int, layer: str):
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(editor.update_motion(job_id, index, layer, data.get("effects", {}),
+                                                data.get("motion"), data.get("character_present")))
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/jobs/<job_id>/editor/sync-jianying")
+    def scene_editor_sync(job_id: str):
+        try:
+            return jsonify(editor.sync_jianying(job_id))
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/jobs/<job_id>/editor/rebuild")
+    def scene_editor_rebuild(job_id: str):
+        try:
+            return jsonify(editor.rebuild(job_id)), 202
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
 
     @app.get("/api/characters")
     def list_characters():
@@ -595,6 +731,8 @@ def create_app(project_root: Path | None = None) -> Flask:
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id: str):
         try:
+            if editor.has_active(job_id):
+                raise ValueError("场景图片或输出正在后台处理，请等待完成后再删除")
             manager.delete(job_id)
             return jsonify(deleted=True)
         except KeyError:

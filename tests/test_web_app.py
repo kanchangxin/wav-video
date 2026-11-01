@@ -123,7 +123,7 @@ class WebAppTests(unittest.TestCase):
                     "generate_images": True, "drawthings_model": "z_image.ckpt",
                     "character_profile_id": profile["id"],
                 }, self.root / "runs" / "character-test")
-        self.assertIn("--review-scenes", command)
+        self.assertNotIn("--review-scenes", command)
         self.assertEqual(command[command.index("--character-profile") + 1], str(folder.resolve()))
         self.assertEqual(command[command.index("--image-seed") + 1], "271829")
         self.assertEqual(command[command.index("--image-prompt-suffix") + 1], "cinematic light")
@@ -140,6 +140,19 @@ class WebAppTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "自动运镜需要"):
             manager._command({"audio_id": "root:中文旁白.m4a", "output": "both",
                               "scene_mode": "fixed", "motion_preset": "auto"}, self.root / "runs" / "motion")
+
+    def test_combined_motion_is_passed_and_no_scene_review_pause(self):
+        manager = self.app.extensions["job_manager"]
+        with patch("web_app.list_models", return_value=[{"id": "test.ckpt", "name": "Test"}]), \
+             patch.object(manager.characters, "get", return_value={"views": {"front": {"status": "approved"}}}), \
+             patch.object(manager.characters, "approved_references", return_value=[Path("front.png")]):
+            command, _, _ = manager._command({"audio_id": "root:中文旁白.m4a", "output": "assets",
+                "scene_mode": "fixed", "generate_images": True, "drawthings_model": "test.ckpt",
+                "character_profile_id": "hero", "motion_effects": {"fade": "in", "vertical": "up"}},
+                self.root / "runs" / "combined")
+        self.assertNotIn("--review-scenes", command)
+        self.assertEqual(json.loads(command[command.index("--motion-effects") + 1]),
+                         {"fade": "in", "vertical": "up"})
 
     def test_profile_model_can_be_changed_and_profile_can_be_deleted(self):
         models = [{"id": "flux.ckpt", "name": "FLUX"}, {"id": "z_image.ckpt", "name": "Z Image"}]

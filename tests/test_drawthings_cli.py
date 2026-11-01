@@ -1,12 +1,27 @@
 import tempfile
 import unittest
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from drawthings_cli import list_models, generate_image
 
 
 class DrawThingsCliTests(unittest.TestCase):
+    def test_concurrent_local_generations_are_serialized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\necho start >> \"$DRAWTHINGS_TEST_LOG\"\nsleep 0.15\necho end >> \"$DRAWTHINGS_TEST_LOG\"\nwhile [ \"$1\" != '--output' ]; do shift; done\nprintf image > \"$2\"\n")
+            cli.chmod(0o755)
+            log = root / "events.log"
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_LOG": str(log)}), \
+                 patch("drawthings_cli.LOCK_PATH", root / "lock", create=True):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    list(pool.map(lambda i: generate_image("scene", root / f"{i}.png", "model.ckpt", 320, 192, cli=cli), range(2)))
+            self.assertEqual(log.read_text().splitlines(), ["start", "end", "start", "end"])
+
     def test_lists_only_downloaded_model_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             cli = Path(tmp) / "draw-things-cli"
