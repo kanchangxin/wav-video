@@ -38,7 +38,8 @@ def list_models(cli: Path | None = None) -> list[dict[str, str]]:
 
 def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                    steps: int | None = None, cli: Path | None = None,
-                   progress: Callable[[int], None] | None = None) -> None:
+                   progress: Callable[[int], None] | None = None,
+                   seed: int | None = None, references: list[Path] | None = None) -> None:
     if not model:
         raise ValueError("请选择已下载的 Draw Things 模型")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,12 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                "--height", str(max(64, round(height / 64) * 64)), "--output", str(path)]
     if steps is not None:
         command += ["--steps", str(steps)]
+    if seed is not None:
+        command += ["--seed", str(seed)]
+    for reference in references or []:
+        if not reference.is_file():
+            raise FileNotFoundError(f"参考图不存在：{reference}")
+        command += ["--image", str(reference)]
     recent = []
     last_percent = -1
     timed_out = threading.Event()

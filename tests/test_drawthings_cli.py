@@ -34,3 +34,21 @@ class DrawThingsCliTests(unittest.TestCase):
             self.assertNotIn("--steps", args)
             self.assertEqual(args[args.index("--height") + 1], "704")
             self.assertEqual(updates, [40, 80])
+
+    def test_generate_passes_fixed_seed_and_ordered_reference_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DRAWTHINGS_TEST_ARGS\"\nwhile [ \"$1\" != '--output' ]; do shift; done\nprintf image > \"$2\"\n")
+            cli.chmod(0o755)
+            first, second = root / "front.png", root / "side.png"
+            first.write_bytes(b"front")
+            second.write_bytes(b"side")
+            from unittest.mock import patch
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_ARGS": str(root / "args.txt")}):
+                generate_image("same person", root / "out.png", "flux.ckpt", 1280, 720,
+                               cli=cli, seed=271829, references=[first, second])
+            args = (root / "args.txt").read_text().splitlines()
+            self.assertEqual(args[args.index("--seed") + 1], "271829")
+            self.assertEqual([args[i + 1] for i, value in enumerate(args) if value == "--image"],
+                             [str(first), str(second)])
