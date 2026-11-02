@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from audio_video import Scene, compose_scene_prompt, export_jianying, render_mp4, validate_foreground
-from drawthings_cli import X2_CONFIG, cli_path, generate_image, generation_base_size, list_models, upscaler_available
+from drawthings_cli import X2_CONFIG, cli_path, generate_image, list_models, upscaler_available
 from jianying_register import register_draft
 from scene_motion import PRESETS, generation_size, normalize_effects
 
@@ -139,9 +139,11 @@ class SceneEditor:
                                                            int(options.get("height") or 720),
                                                            scene.get("motion") or "static",
                                                            scene.get("motion_effects") or {})
-            needed_width, needed_height = generation_base_size(needed_width, needed_height, upscale_x2)
             width, height = max(width, needed_width), max(height, needed_height)
-        width, height = max(64, round(width / 64) * 64), max(64, round(height / 64) * 64)
+        if upscale_x2:
+            width, height = (width + 63) // 64 * 64, (height + 63) // 64 * 64
+        else:
+            width, height = max(64, round(width / 64) * 64), max(64, round(height / 64) * 64)
         target = scene.get("image" if layer == "foreground" else layer)
         if layer == "foreground":
             target = scene.get("image")
@@ -539,6 +541,8 @@ class SceneEditor:
         audio = self.manager.resolve_audio(job["audio_id"])
         srt = folder / "subtitles.srt"
         width, height, fps = int(options.get("width", 1280)), int(options.get("height", 720)), int(options.get("fps", 25))
+        if options.get("upscale_x2"):
+            width, height = width * 2, height * 2
         pending = folder / f"video_{task_id}.mp4"
         draft = folder / f"jianying_draft_edit_{task_id}"
         try:

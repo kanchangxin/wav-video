@@ -68,7 +68,7 @@ uv run python audio_video.py "信使高欢的逆袭.m4a" \
 
 生图直接调用本机 `draw-things-cli`，优先使用 `tools/drawthings/draw-things-cli`，也支持安装到 `PATH`。页面自动列出 CLI 检测到的已下载模型；步数留空时使用模型推荐值。命令行可用 `--drawthings-model` 和可选的 `--image-steps`。生成时启用本地离线模式，不会下载额外模型。图片保存在输出目录 `images/scene_001.png` 等，重跑时会复用；生图失败会提示并使用黑色画面。[CLI 官方说明](https://github.com/drawthingsai/draw-things-community#quick-start-with-draw-things-cli-on-macos)。
 
-可在场景生图、角色基准图及已完成项目的场景图片编辑页勾选 **Real-ESRGAN X2+ 放大**；命令行对应 `--upscale-x2`。系统先将基础生图宽高降到覆盖目标画面的约一半（按 64 像素向上取整），再由 Draw Things 在同一次调用中放大 2 倍。运镜所需的额外画面余量会先计入目标尺寸。必须已在本机安装 `realesrgan_x2plus_f16.ckpt`；没有勾选时沿用原有尺寸与缓存。X2+ 是后处理放大，细节质量仍取决于基础图。
+可在场景生图、角色基准图及已完成项目的场景图片编辑页勾选 **Real-ESRGAN X2+ 放大**；命令行对应 `--upscale-x2`。主页面的宽高表示基础生图尺寸：勾选后 Draw Things 在同一次调用中放大 2 倍，MP4 和剪映画布也扩大 2 倍。例如输入 640×384，输出 1280×768；运镜需要余量时，场景原图可能更大。角色基准图页使用预设的最终尺寸，勾选时基础图约为预设尺寸的一半。必须已在本机安装 `realesrgan_x2plus_f16.ckpt`；没有勾选时沿用原有尺寸与缓存。X2+ 是后处理放大，细节质量仍取决于基础图。
 
 `tools/drawthings/draw-things-cli` 是本机安装的 277MB 可执行文件，不纳入 GitHub；模型、输入音频和生成结果也属于本地资产。重新克隆项目后，请按 [Draw Things CLI 说明](https://github.com/drawthingsai/draw-things-community#quick-start-with-draw-things-cli-on-macos) 安装 CLI，或将可执行文件放回该路径，程序代码和配置即可恢复。
 

@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from drawthings_cli import generate_image, generation_base_size, upscaler_available
+from drawthings_cli import generate_image, upscaler_available
 from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for, normalize_effects
 
 
@@ -798,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generate-images", action="store_true", help="通过 Draw Things 为场景生图")
     parser.add_argument("--images-dir", type=Path, help="复用 scene_001.png、scene_002.png 等图片")
     parser.add_argument("--drawthings-model", help="本机已下载的 Draw Things 模型文件名")
-    parser.add_argument("--upscale-x2", action="store_true", help="用较小基础图生图，再用本地 Real-ESRGAN X2+ 放大")
+    parser.add_argument("--upscale-x2", action="store_true", help="按指定宽高生图，再用本地 Real-ESRGAN X2+ 放大到 2 倍")
     parser.add_argument("--image-steps", type=int, help="生图步数；留空使用模型推荐值")
     parser.add_argument("--image-seed", type=int, default=271829, help="场景生图使用的固定 seed，默认 271829")
     parser.add_argument("--image-prompt-suffix", default="", help="附加到每个场景生图提示词末尾的固定文本")
@@ -828,6 +828,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("生图需要 --scene-mode fixed 或 llm")
         if args.generate_images and args.upscale_x2 and not upscaler_available():
             raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
+        if args.upscale_x2 and not args.generate_images:
+            raise ValueError("使用 Real-ESRGAN X2+ 需要开启 Draw Things 生图")
         if args.motion_preset == "parallax" and (not args.generate_images or not args.character_profile):
             raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
         if args.motion_preset == "auto" and not args.llm_model:
@@ -920,7 +922,9 @@ def main(argv: list[str] | None = None) -> int:
             image_width, image_height = generation_size(args.width, args.height, scene.motion, scene.motion_effects)
             if scene.motion == "parallax" and scene.character_present:
                 image_width, image_height = args.width, args.height
-            image_width, image_height = generation_base_size(image_width, image_height, args.upscale_x2)
+            if args.upscale_x2:
+                image_width = (image_width + 63) // 64 * 64
+                image_height = (image_height + 63) // 64 * 64
             fingerprint = image_request_fingerprint(final_prompt, args.drawthings_model or "", image_width,
                                                     image_height, args.image_steps, args.image_seed, references,
                                                     args.upscale_x2)
@@ -931,6 +935,9 @@ def main(argv: list[str] | None = None) -> int:
                       "upscale_x2": args.upscale_x2,
                       "fingerprint": fingerprint, "status": "pending"}
             print(f"场景 {i} 最终生图提示词：{final_prompt}\nseed：{args.image_seed}；参考图：{record['references']}", flush=True)
+            if args.generate_images and args.upscale_x2:
+                print(f"场景 {i} 基础生图尺寸：{image_width}×{image_height}；X2+ 输出尺寸："
+                      f"{image_width * 2}×{image_height * 2}", flush=True)
             if image.is_file() and (args.images_dir is not None or image_cache_matches(metadata, fingerprint)):
                 scene.image = str(image)
                 record["status"] = "reused"
@@ -958,8 +965,6 @@ def main(argv: list[str] | None = None) -> int:
                                      "lighting and camera angle. No people, no figures, no silhouettes, no text."
                                      + (f"\n{args.image_prompt_suffix}" if args.image_prompt_suffix else ""))
                 background_width, background_height = generation_size(args.width, args.height, "parallax")
-                background_width, background_height = generation_base_size(background_width, background_height,
-                                                                          args.upscale_x2)
                 background_fingerprint = image_request_fingerprint(background_prompt, args.drawthings_model or "",
                                                                     background_width, background_height, args.image_steps,
                                                                     args.image_seed, [], args.upscale_x2)
@@ -1003,14 +1008,16 @@ def main(argv: list[str] | None = None) -> int:
             image_records.append(record)
         (output / "image_generation.json").write_text(json.dumps(image_records, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "scenes.json").write_text(json.dumps([asdict(s) for s in scenes], ensure_ascii=False, indent=2), encoding="utf-8")
+        canvas_width = args.width * (2 if args.upscale_x2 else 1)
+        canvas_height = args.height * (2 if args.upscale_x2 else 1)
         if args.output in ("mp4", "both"):
             write_progress(output, "合成视频", 88)
-            render_mp4(audio, scenes, srt, output / "video.mp4", args.width, args.height, args.fps,
+            render_mp4(audio, scenes, srt, output / "video.mp4", canvas_width, canvas_height, args.fps,
                        progress=lambda fraction: write_progress(output, "合成视频", 88 + round(fraction * 5)))
         if args.output in ("jianying", "both"):
             write_progress(output, "生成剪映草稿", 94)
             draft_path = output / (args.draft_name or "jianying_draft")
-            draft_file = export_jianying(audio, scenes, srt, draft_path, args.width, args.height)
+            draft_file = export_jianying(audio, scenes, srt, draft_path, canvas_width, canvas_height)
             if args.register_jianying:
                 from jianying_register import register_draft
                 registered = register_draft(draft_file.parent, args.jianying_drafts_dir, args.draft_name or original_audio_name)

@@ -65,6 +65,8 @@ class SceneEditorTests(unittest.TestCase):
         (self.output / "image_generation.json").write_text(json.dumps(records))
         layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
         self.assertIn("--config-json", layer["command"])
+        self.assertIn("--width 320", layer["command"])
+        self.assertIn("--height 192", layer["command"])
         self.assertTrue(layer["upscale_x2"])
         with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)) as generate:
             submitted = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={

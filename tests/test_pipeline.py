@@ -41,7 +41,7 @@ class TimelineTests(unittest.TestCase):
         expected = hashlib.sha256(json.dumps(legacy, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         self.assertEqual(plain, expected)
 
-    def test_x2_scene_generation_uses_smaller_base_and_records_setting(self):
+    def test_x2_scene_generation_doubles_entered_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audio = root / "voice.m4a"
@@ -60,9 +60,36 @@ class TimelineTests(unittest.TestCase):
                                "--output", "assets", "--scene-mode", "fixed", "--generate-images",
                                "--drawthings-model", "test.ckpt", "--upscale-x2"])
             self.assertEqual(result, 0)
-            self.assertEqual(calls, [(640, 384, True)])
+            self.assertEqual(calls, [(1280, 768, True)])
             record = json.loads((output / "image_generation.json").read_text())[0]
-            self.assertEqual((record["width"], record["height"], record["upscale_x2"]), (640, 384, True))
+            self.assertEqual((record["width"], record["height"], record["upscale_x2"]), (1280, 768, True))
+
+    def test_x2_output_canvas_is_twice_entered_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([{"start": 0, "end": 1, "text": "city"}]))
+            output = root / "out"
+            sizes = []
+            def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+                path.write_bytes(b"image")
+            def fake_render(audio, scenes, srt, path, width, height, fps, **kwargs):
+                sizes.append(("mp4", width, height))
+            def fake_draft(audio, scenes, srt, path, width, height):
+                sizes.append(("jianying", width, height))
+                return path / "draft_content.json"
+            with patch("audio_video.generate_image", side_effect=fake_generate), \
+                 patch("audio_video.upscaler_available", return_value=True), \
+                 patch("audio_video.render_mp4", side_effect=fake_render), \
+                 patch("audio_video.export_jianying", side_effect=fake_draft):
+                result = main([str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
+                               "--output", "both", "--scene-mode", "fixed", "--generate-images",
+                               "--drawthings-model", "test.ckpt", "--upscale-x2", "--width", "640", "--height", "384"])
+            self.assertEqual(result, 0)
+            self.assertEqual(sizes, [("mp4", 1280, 768), ("jianying", 1280, 768)])
 
     def test_scene_review_applies_explicit_presence_before_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
