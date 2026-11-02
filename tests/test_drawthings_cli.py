@@ -5,10 +5,32 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from drawthings_cli import list_models, generate_image
+from drawthings_cli import list_models, generate_image, generation_base_size
 
 
 class DrawThingsCliTests(unittest.TestCase):
+    def test_x2_upscaler_uses_half_size_diffusion_and_cli_config(self):
+        self.assertEqual(generation_base_size(1280, 720, True), (640, 384))
+        self.assertEqual(generation_base_size(1280, 720, False), (1280, 720))
+        from scene_motion import generation_size
+        target = generation_size(1280, 720, "pan_left")
+        base = generation_base_size(*target, True)
+        self.assertTrue(all(2 * source >= required for source, required in zip(base, target)))
+        self.assertTrue(all(source < required for source, required in zip(base, target)))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DRAWTHINGS_TEST_ARGS\"\nwhile [ \"$1\" != '--output' ]; do shift; done\nprintf image > \"$2\"\n")
+            cli.chmod(0o755)
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_ARGS": str(root / "args.txt")}):
+                generate_image("city", root / "scene.png", "model.ckpt", 640, 384,
+                               cli=cli, upscale_x2=True)
+            args = (root / "args.txt").read_text().splitlines()
+            import json
+            config = json.loads(args[args.index("--config-json") + 1])
+            self.assertEqual(config, {"upscaler": "realesrgan_x2plus_f16.ckpt", "upscalerScaleFactor": 2})
+            self.assertEqual(args[args.index("--width") + 1], "640")
+
     def test_concurrent_local_generations_are_serialized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

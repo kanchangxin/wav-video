@@ -59,6 +59,25 @@ class SceneEditorTests(unittest.TestCase):
         self.assertIn("同步到剪映", html)
         self.assertEqual(self.client.get("/api/jobs/testjob/editor/tasks").status_code, 200)
 
+    def test_editor_exposes_and_accepts_x2_upscaler_command(self):
+        records = json.loads((self.output / "image_generation.json").read_text())
+        records[0].update(width=192, height=128, upscale_x2=True)
+        (self.output / "image_generation.json").write_text(json.dumps(records))
+        layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        self.assertIn("--config-json", layer["command"])
+        self.assertTrue(layer["upscale_x2"])
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)) as generate:
+            submitted = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "image", "command": layer["command"]})
+            self.assertEqual(submitted.status_code, 202, submitted.get_data(as_text=True))
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{submitted.get_json()['id']}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertTrue(generate.call_args.kwargs["upscale_x2"])
+
     def test_upload_candidate_keeps_original_until_accept_and_saves_revision(self):
         blue = self.root / "blue.png"
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x192:d=0.04",

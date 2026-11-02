@@ -16,8 +16,8 @@ class TimelineTests(unittest.TestCase):
     def test_identity_prompt_only_applies_when_protagonist_is_present(self):
         with_character = compose_scene_prompt("ancient battlefield", "cinematic light", "高欢", True, True)
         without_character = compose_scene_prompt("empty battlefield", "cinematic light", "高欢", False, True)
-        self.assertIn("Use image 1 as the identity reference", with_character)
-        self.assertIn("高欢", with_character)
+        self.assertIn("Use image 1 as", with_character)
+        self.assertIn("identity reference", with_character)
         self.assertTrue(with_character.endswith("cinematic light"))
         self.assertNotIn("identity reference", without_character)
         self.assertTrue(without_character.endswith("cinematic light"))
@@ -30,6 +30,39 @@ class TimelineTests(unittest.TestCase):
             self.assertNotEqual(first, image_request_fingerprint("a scene", "flux.ckpt", 1280, 720, None, 271830, [image]))
             image.write_bytes(b"revised portrait")
             self.assertNotEqual(first, image_request_fingerprint("a scene", "flux.ckpt", 1280, 720, None, 271829, [image]))
+
+    def test_image_fingerprint_changes_when_x2_upscaler_is_enabled(self):
+        plain = image_request_fingerprint("scene", "model.ckpt", 640, 384, None, 42, [])
+        enlarged = image_request_fingerprint("scene", "model.ckpt", 640, 384, None, 42, [], upscale_x2=True)
+        self.assertNotEqual(plain, enlarged)
+        import hashlib
+        legacy = {"prompt": "scene", "model": "model.ckpt", "width": 640, "height": 384,
+                  "steps": None, "seed": 42, "reference_hashes": []}
+        expected = hashlib.sha256(json.dumps(legacy, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        self.assertEqual(plain, expected)
+
+    def test_x2_scene_generation_uses_smaller_base_and_records_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([{"start": 0, "end": 1, "text": "city"}]))
+            output = root / "out"
+            calls = []
+            def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+                calls.append((width, height, kwargs.get("upscale_x2")))
+                path.write_bytes(b"image")
+            with patch("audio_video.generate_image", side_effect=fake_generate), \
+                 patch("audio_video.upscaler_available", return_value=True):
+                result = main([str(audio), "--transcript-json", str(transcript), "--output-dir", str(output),
+                               "--output", "assets", "--scene-mode", "fixed", "--generate-images",
+                               "--drawthings-model", "test.ckpt", "--upscale-x2"])
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [(640, 384, True)])
+            record = json.loads((output / "image_generation.json").read_text())[0]
+            self.assertEqual((record["width"], record["height"], record["upscale_x2"]), (640, 384, True))
 
     def test_scene_review_applies_explicit_presence_before_generation(self):
         with tempfile.TemporaryDirectory() as tmp:

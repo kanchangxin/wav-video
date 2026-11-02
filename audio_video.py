@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from drawthings_cli import generate_image
+from drawthings_cli import generate_image, generation_base_size, upscaler_available
 from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for, normalize_effects
 
 
@@ -59,10 +59,13 @@ def compose_scene_prompt(prompt: str, suffix: str, character_name: str,
 
 
 def image_request_fingerprint(prompt: str, model: str, width: int, height: int,
-                              steps: int | None, seed: int | None, references: list[Path]) -> str:
+                              steps: int | None, seed: int | None, references: list[Path],
+                              upscale_x2: bool = False) -> str:
     data = {"prompt": prompt, "model": model, "width": width, "height": height,
             "steps": steps, "seed": seed,
             "reference_hashes": [hashlib.sha256(path.read_bytes()).hexdigest() for path in references]}
+    if upscale_x2:
+        data["upscale_x2"] = True
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -795,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generate-images", action="store_true", help="通过 Draw Things 为场景生图")
     parser.add_argument("--images-dir", type=Path, help="复用 scene_001.png、scene_002.png 等图片")
     parser.add_argument("--drawthings-model", help="本机已下载的 Draw Things 模型文件名")
+    parser.add_argument("--upscale-x2", action="store_true", help="用较小基础图生图，再用本地 Real-ESRGAN X2+ 放大")
     parser.add_argument("--image-steps", type=int, help="生图步数；留空使用模型推荐值")
     parser.add_argument("--image-seed", type=int, default=271829, help="场景生图使用的固定 seed，默认 271829")
     parser.add_argument("--image-prompt-suffix", default="", help="附加到每个场景生图提示词末尾的固定文本")
@@ -822,6 +826,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("生图 seed 须在 0 到 4294967295 之间")
         if args.generate_images and args.scene_mode == "none":
             raise ValueError("生图需要 --scene-mode fixed 或 llm")
+        if args.generate_images and args.upscale_x2 and not upscaler_available():
+            raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
         if args.motion_preset == "parallax" and (not args.generate_images or not args.character_profile):
             raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
         if args.motion_preset == "auto" and not args.llm_model:
@@ -914,12 +920,15 @@ def main(argv: list[str] | None = None) -> int:
             image_width, image_height = generation_size(args.width, args.height, scene.motion, scene.motion_effects)
             if scene.motion == "parallax" and scene.character_present:
                 image_width, image_height = args.width, args.height
+            image_width, image_height = generation_base_size(image_width, image_height, args.upscale_x2)
             fingerprint = image_request_fingerprint(final_prompt, args.drawthings_model or "", image_width,
-                                                    image_height, args.image_steps, args.image_seed, references)
+                                                    image_height, args.image_steps, args.image_seed, references,
+                                                    args.upscale_x2)
             metadata = images_dir / f"scene_{i:03}.request.json"
             record = {"scene": i, "prompt": final_prompt, "seed": args.image_seed,
                       "references": [str(path) for path in references], "model": args.drawthings_model,
                       "steps": args.image_steps, "width": image_width, "height": image_height,
+                      "upscale_x2": args.upscale_x2,
                       "fingerprint": fingerprint, "status": "pending"}
             print(f"场景 {i} 最终生图提示词：{final_prompt}\nseed：{args.image_seed}；参考图：{record['references']}", flush=True)
             if image.is_file() and (args.images_dir is not None or image_cache_matches(metadata, fingerprint)):
@@ -933,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
                                    args.image_steps,
                                    progress=lambda percent: write_progress(output, f"生成图片 {i}/{len(scenes)}",
                                                                            65 + round(((i - 1) + percent / (200 if needs_layer else 100)) / len(scenes) * 20)),
-                                   seed=args.image_seed, references=references)
+                                   seed=args.image_seed, references=references, upscale_x2=args.upscale_x2)
                     temporary_image.replace(image)
                     record["status"] = "generated"
                     metadata.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -949,9 +958,11 @@ def main(argv: list[str] | None = None) -> int:
                                      "lighting and camera angle. No people, no figures, no silhouettes, no text."
                                      + (f"\n{args.image_prompt_suffix}" if args.image_prompt_suffix else ""))
                 background_width, background_height = generation_size(args.width, args.height, "parallax")
+                background_width, background_height = generation_base_size(background_width, background_height,
+                                                                          args.upscale_x2)
                 background_fingerprint = image_request_fingerprint(background_prompt, args.drawthings_model or "",
                                                                     background_width, background_height, args.image_steps,
-                                                                    args.image_seed, [])
+                                                                    args.image_seed, [], args.upscale_x2)
                 background_metadata = images_dir / f"scene_{i:03}_background.request.json"
                 try:
                     print(f"场景 {i} 空背景提示词：{background_prompt}", flush=True)
@@ -959,6 +970,7 @@ def main(argv: list[str] | None = None) -> int:
                         pending_background = images_dir / f"scene_{i:03}_background.pending.png"
                         generate_image(background_prompt, pending_background, args.drawthings_model or "",
                                        background_width, background_height, args.image_steps, seed=args.image_seed,
+                                       upscale_x2=args.upscale_x2,
                                        progress=lambda percent: write_progress(output, f"生成空背景 {i}/{len(scenes)}",
                                                                                65 + round(((i - 1) + 0.5 + percent / 200) / len(scenes) * 20)))
                         pending_background.replace(background)
@@ -966,7 +978,8 @@ def main(argv: list[str] | None = None) -> int:
                                                                    "prompt": background_prompt,
                                                                    "model": args.drawthings_model, "width": background_width,
                                                                    "height": background_height, "steps": args.image_steps,
-                                                                   "seed": args.image_seed, "references": []}, ensure_ascii=False,
+                                                                   "seed": args.image_seed, "references": [],
+                                                                   "upscale_x2": args.upscale_x2}, ensure_ascii=False,
                                                                   indent=2), encoding="utf-8")
                     if not foreground.is_file() or foreground.stat().st_mtime < Path(scene.image).stat().st_mtime:
                         cutout = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"

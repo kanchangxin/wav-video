@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import fcntl
 import shutil
@@ -14,6 +16,23 @@ from typing import Callable
 
 DEFAULT_CLI = Path(__file__).resolve().parent / "tools" / "drawthings" / "draw-things-cli"
 LOCK_PATH = Path(tempfile.gettempdir()) / "wav-video-drawthings.lock"
+X2_UPSCALER = "realesrgan_x2plus_f16.ckpt"
+X2_CONFIG = {"upscaler": X2_UPSCALER, "upscalerScaleFactor": 2}
+
+
+def upscaler_available() -> bool:
+    configured = os.getenv("DRAWTHINGS_MODELS_DIR")
+    models = Path(configured).expanduser() if configured else (
+        Path.home() / "Library/Containers/com.liuliu.draw-things/Data/Documents/Models")
+    return (models / X2_UPSCALER).is_file()
+
+
+def generation_base_size(width: int, height: int, upscale_x2: bool) -> tuple[int, int]:
+    """Return diffusion dimensions that cover the requested size after 2x export."""
+    if not upscale_x2:
+        return width, height
+    return (max(64, ((width + 127) // 128) * 64),
+            max(64, ((height + 127) // 128) * 64))
 
 
 def cli_path() -> Path:
@@ -42,7 +61,8 @@ def list_models(cli: Path | None = None) -> list[dict[str, str]]:
 def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                    steps: int | None = None, cli: Path | None = None,
                    progress: Callable[[int], None] | None = None,
-                   seed: int | None = None, references: list[Path] | None = None) -> None:
+                   seed: int | None = None, references: list[Path] | None = None,
+                   upscale_x2: bool = False) -> None:
     if not model:
         raise ValueError("请选择已下载的 Draw Things 模型")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +74,8 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
         command += ["--steps", str(steps)]
     if seed is not None:
         command += ["--seed", str(seed)]
+    if upscale_x2:
+        command += ["--config-json", json.dumps(X2_CONFIG, separators=(",", ":"))]
     prepared_reference = None
     selected_references = list(references or [])
     if selected_references:

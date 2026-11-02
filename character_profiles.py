@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO
 
-from drawthings_cli import generate_image
+from drawthings_cli import generate_image, generation_base_size, upscaler_available
 
 
 VIEWS = ("front", "three_quarter", "full_body")
@@ -121,7 +121,8 @@ class CharacterStore:
         raise ValueError("未知的角色视角")
 
     def generate_preview(self, profile_id: str, view: str, prompt: str,
-                         steps: int | None = None, reserved: bool = False) -> dict:
+                         steps: int | None = None, reserved: bool = False,
+                         upscale_x2: bool = False) -> dict:
         if view not in VIEWS:
             raise ValueError("未知的角色视角")
         prompt = prompt.strip()
@@ -139,6 +140,7 @@ class CharacterStore:
         preview = folder / f"draft_{view}.png"
         references = [] if view == "front" else [folder / "front.png"]
         width, height = VIEW_SIZE[view]
+        base_width, base_height = generation_base_size(width, height, upscale_x2)
 
         def on_progress(percent: int) -> None:
             with self.lock:
@@ -148,8 +150,9 @@ class CharacterStore:
                     self._save(current)
 
         try:
-            generate_image(prompt, preview, profile["model"], width, height, steps,
-                           progress=on_progress, seed=profile["seed"], references=references)
+            generate_image(prompt, preview, profile["model"], base_width, base_height, steps,
+                           progress=on_progress, seed=profile["seed"], references=references,
+                           upscale_x2=upscale_x2)
         except Exception as exc:
             with self.lock:
                 current = self.get(profile_id)
@@ -159,15 +162,20 @@ class CharacterStore:
         with self.lock:
             current = self.get(profile_id)
             current["views"][view] = {"status": "draft", "prompt": prompt,
-                                      "width": width, "height": height, "steps": steps}
+                                      "width": width, "height": height, "steps": steps,
+                                      "upscale_x2": upscale_x2}
             current["generation"] = {"view": view, "status": "completed", "percent": 100, "error": ""}
             self._save(current)
             return current
 
     def start_generation(self, profile_id: str, view: str, prompt: str,
-                         steps: int | None = None) -> dict:
+                         steps: int | None = None, upscale_x2: bool = False) -> dict:
         if view not in VIEWS or not prompt.strip():
             raise ValueError("请选择角色视角并填写提示词")
+        if not isinstance(upscale_x2, bool):
+            raise ValueError("放大选项须为勾选状态")
+        if upscale_x2 and not upscaler_available():
+            raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
         with self.lock:
             profile = self.get(profile_id)
             if view != "front" and profile["views"]["front"]["status"] != "approved":
@@ -179,7 +187,7 @@ class CharacterStore:
 
         def work() -> None:
             try:
-                self.generate_preview(profile_id, view, prompt, steps, reserved=True)
+                self.generate_preview(profile_id, view, prompt, steps, reserved=True, upscale_x2=upscale_x2)
             except Exception:
                 pass  # generate_preview persists the error for polling clients.
 

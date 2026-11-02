@@ -19,6 +19,17 @@ class CharacterStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.create("主角", "../outside", "flux.ckpt", 271829, "portrait")
 
+    def test_x2_character_preview_uses_half_base_and_keeps_final_view_size(self):
+        profile = self.store.create("高欢", "characters/gaohuan", "flux.ckpt", 271829, "portrait")
+        calls = []
+        def fake_generate(prompt, path, model, width, height, steps=None, **kwargs):
+            calls.append((width, height, kwargs.get("upscale_x2")))
+            path.write_bytes(b"image")
+        with patch("character_profiles.generate_image", side_effect=fake_generate):
+            result = self.store.generate_preview(profile["id"], "front", "portrait", upscale_x2=True)
+        self.assertEqual(calls, [(384, 512, True)])
+        self.assertEqual((result["views"]["front"]["width"], result["views"]["front"]["height"]), (768, 1024))
+
     def test_side_requires_approved_front_and_uses_front_as_reference(self):
         profile = self.store.create("高欢", "characters/gaohuan", "flux.ckpt", 271829, "front prompt")
         with self.assertRaises(ValueError):

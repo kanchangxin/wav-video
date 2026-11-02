@@ -28,8 +28,24 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("开始处理", page.get_data(as_text=True))
         self.assertIn("全局画面设定", page.get_data(as_text=True))
+        self.assertIn("Real-ESRGAN X2+", page.get_data(as_text=True))
         audio = self.client.get("/api/audio").get_json()["files"]
         self.assertIn({"id": "root:中文旁白.m4a", "name": "中文旁白.m4a"}, audio)
+
+    def test_x2_option_is_validated_and_passed_to_pipeline(self):
+        manager = self.app.extensions["job_manager"]
+        data = {"audio_id": "root:中文旁白.m4a", "output": "assets", "scene_mode": "fixed",
+                "generate_images": True, "drawthings_model": "test.ckpt", "upscale_x2": True}
+        with patch("web_app.list_models", return_value=[{"id": "test.ckpt", "name": "Test"}]), \
+             patch("web_app.upscaler_available", return_value=True):
+            command, _, saved = manager._command(data, self.root / "runs" / "upscale-test")
+        self.assertIn("--upscale-x2", command)
+        self.assertTrue(saved["options"]["upscale_x2"])
+        with self.assertRaisesRegex(ValueError, "放大选项"):
+            manager._command({**data, "upscale_x2": "true"}, self.root / "runs" / "upscale-test")
+        with patch("web_app.upscaler_available", return_value=False):
+            with self.assertRaisesRegex(ValueError, "Real-ESRGAN X2"):
+                manager._command(data, self.root / "runs" / "upscale-test")
 
     def test_character_page_and_profile_creation(self):
         self.assertEqual(self.client.get("/characters").status_code, 200)

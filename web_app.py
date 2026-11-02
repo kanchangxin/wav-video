@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from jianying_register import register_draft, registration_status
-from drawthings_cli import list_models
+from drawthings_cli import list_models, upscaler_available
 from scene_motion import normalize_effects
 from scene_editor import SceneEditor
 from character_profiles import CharacterStore, DEFAULT_FRONT_PROMPT, VIEWS
@@ -118,6 +118,13 @@ class JobManager:
         else:
             image_steps = None
         image_seed = number("image_seed", 271829, 0, 4294967295, True)
+        upscale_x2 = data.get("upscale_x2", False)
+        if not isinstance(upscale_x2, bool):
+            raise ValueError("放大选项须为勾选状态")
+        if upscale_x2 and not generate_images:
+            raise ValueError("使用放大选项需要开启 Draw Things 生图")
+        if upscale_x2 and not upscaler_available():
+            raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
         image_prompt_suffix = str(data.get("image_prompt_suffix") or "").strip()
         if len(image_prompt_suffix) > 4000:
             raise ValueError("固定提示词后缀不能超过 4000 个字符")
@@ -163,6 +170,8 @@ class JobManager:
             command += ["--image-steps", str(image_steps)]
         if generate_images:
             command += ["--image-seed", str(image_seed)]
+            if upscale_x2:
+                command.append("--upscale-x2")
             if image_prompt_suffix:
                 command += ["--image-prompt-suffix", image_prompt_suffix]
             if profile_id:
@@ -593,7 +602,8 @@ def create_app(project_root: Path | None = None) -> Flask:
             if steps is not None and not 1 <= steps <= 150:
                 raise ValueError("生图步数须在 1 到 150 之间")
             result = manager.characters.start_generation(profile_id, str(data.get("view") or ""),
-                                                          str(data.get("prompt") or ""), steps)
+                                                          str(data.get("prompt") or ""), steps,
+                                                          upscale_x2=data.get("upscale_x2", False))
             return jsonify(result), 202
         except KeyError:
             return jsonify(error="角色档案不存在"), 404
@@ -653,7 +663,7 @@ def create_app(project_root: Path | None = None) -> Flask:
     @app.get("/api/drawthings/models")
     def drawthings_models():
         try:
-            return jsonify(models=list_models())
+            return jsonify(models=list_models(), upscaler_x2_available=upscaler_available())
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return jsonify(error=f"无法读取 Draw Things 本地模型：{exc}"), 503
 

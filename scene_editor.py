@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import BinaryIO
 
 from audio_video import Scene, compose_scene_prompt, export_jianying, render_mp4, validate_foreground
-from drawthings_cli import cli_path, generate_image, list_models
+from drawthings_cli import X2_CONFIG, cli_path, generate_image, generation_base_size, list_models, upscaler_available
 from jianying_register import register_draft
 from scene_motion import PRESETS, generation_size, normalize_effects
 
 
 LAYER_KEYS = {"image": "image", "background": "background", "foreground": "foreground"}
-IMAGE_FLAGS = {"--model", "--prompt", "--width", "--height", "--output", "--steps", "--seed", "--image"}
+IMAGE_FLAGS = {"--model", "--prompt", "--width", "--height", "--output", "--steps", "--seed", "--image", "--config-json"}
 SWITCHES = {"--local", "--offline", "--no-download-missing", "--disable-preview"}
 
 
@@ -132,11 +132,14 @@ class SceneEditor:
                 references = []
                 prompt = compose_scene_prompt(scene["prompt"], str(options.get("image_prompt_suffix") or ""),
                                               "", False, False)
+        source_record = background_record or record
+        upscale_x2 = bool(source_record.get("upscale_x2", options.get("upscale_x2", False)))
         if layer != "foreground" and (layer == "background" or scene.get("motion") != "parallax"):
             needed_width, needed_height = generation_size(int(options.get("width") or 1280),
                                                            int(options.get("height") or 720),
                                                            scene.get("motion") or "static",
                                                            scene.get("motion_effects") or {})
+            needed_width, needed_height = generation_base_size(needed_width, needed_height, upscale_x2)
             width, height = max(width, needed_width), max(height, needed_height)
         width, height = max(64, round(width / 64) * 64), max(64, round(height / 64) * 64)
         target = scene.get("image" if layer == "foreground" else layer)
@@ -144,12 +147,11 @@ class SceneEditor:
             target = scene.get("image")
         if not target:
             target = str(folder / "images" / f"scene_{index:03}{'_background' if layer == 'background' else ''}.png")
-        source_record = background_record or record
         return {"prompt": prompt, "model": source_record.get("model") or record.get("model") or options.get("drawthings_model") or "",
                 "width": width, "height": height, "steps": source_record.get("steps") or record.get("steps") or options.get("image_steps"),
                 "seed": source_record.get("seed") if source_record.get("seed") is not None else
                 (record.get("seed") if record.get("seed") is not None else options.get("image_seed", 271829)),
-                "references": references, "output": target}
+                "references": references, "output": target, "upscale_x2": upscale_x2}
 
     def _command(self, params: dict) -> str:
         args = [str(cli_path()), "generate", "--local", "--offline", "--no-download-missing",
@@ -160,6 +162,8 @@ class SceneEditor:
             args += ["--steps", str(params["steps"])]
         if params.get("seed") not in (None, ""):
             args += ["--seed", str(params["seed"])]
+        if params.get("upscale_x2"):
+            args += ["--config-json", json.dumps(X2_CONFIG, separators=(",", ":"))]
         for path in params.get("references") or []:
             args += ["--image", str(path)]
         return shlex.join(args)
@@ -215,10 +219,21 @@ class SceneEditor:
             raise ValueError("模型和提示词不能为空")
         if len(found["--prompt"]) > 4000:
             raise ValueError("提示词不能超过 4000 个字符")
+        upscale_x2 = False
+        if "--config-json" in found:
+            try:
+                upscale_x2 = json.loads(str(found["--config-json"])) == X2_CONFIG
+            except ValueError as exc:
+                raise ValueError("放大配置不是有效 JSON") from exc
+            if not upscale_x2:
+                raise ValueError("只支持 Real-ESRGAN X2+ 放大配置")
+            if not upscaler_available():
+                raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
         if model != original["model"] and model not in {item["id"] for item in list_models()}:
             raise ValueError("请选择本机已下载的 Draw Things 模型")
         return {"prompt": found["--prompt"], "model": model, "width": width, "height": height,
-                "steps": steps, "seed": seed, "references": references, "output": original["output"]}
+                "steps": steps, "seed": seed, "references": references, "output": original["output"],
+                "upscale_x2": upscale_x2}
 
     def inventory(self, job_id: str) -> dict:
         folder = self._folder(job_id)
@@ -241,6 +256,7 @@ class SceneEditor:
                                "command": self._command(params), "source": path,
                                "cutout_command": cutout_command,
                                "derived": layer == "foreground",
+                               "upscale_x2": params["upscale_x2"],
                                "motion_effects": scene.get("foreground_effects", {}) if layer == "foreground" else scene.get("motion_effects", {})})
             result.append({"index": i, "start": scene["start"], "end": scene["end"],
                            "prompt": scene["prompt"], "character_present": scene.get("character_present", False),
@@ -362,6 +378,7 @@ class SceneEditor:
                     generate_image(params["prompt"], source, params["model"], params["width"], params["height"],
                                    params["steps"], seed=params["seed"],
                                    references=[Path(path) for path in params["references"]],
+                                   upscale_x2=params["upscale_x2"],
                                    progress=lambda percent: self._set_progress(job_id, task_id, percent))
                 if task["kind"] == "upload":
                     candidate = Path(task["candidate"])
