@@ -409,7 +409,7 @@ def create_app(project_root: Path | None = None) -> Flask:
     def scene_editor_page(job_id: str):
         try:
             editor._folder(job_id)
-            return render_template("scenes.html", job_id=job_id)
+            return render_template("scene_workspace.html", job_id=job_id)
         except KeyError:
             return "任务不存在", 404
         except ValueError as exc:
@@ -445,7 +445,8 @@ def create_app(project_root: Path | None = None) -> Flask:
     def scene_editor_generate(job_id: str):
         data = request.get_json(silent=True) or {}
         try:
-            return jsonify(editor.generate(job_id, int(data.get("scene")), str(data.get("layer")), str(data.get("command")))), 202
+            return jsonify(editor.generate(job_id, int(data.get("scene")), str(data.get("layer")),
+                                        str(data.get("command")), data.get("references") if "references" in data else None)), 202
         except KeyError:
             return jsonify(error="任务不存在"), 404
         except (ValueError, TypeError, OSError) as exc:

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>场景图片编辑 · 声音成片工作台</title>
+  <style>
+    :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0d1220;color:#e8edfb}
+    *{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer}a{color:#bdcaff}
+    .hidden{display:none!important}.muted,.hint{color:#94a2bd;font-size:12px;line-height:1.5}.hint{margin:7px 0 0}.mono{font-family:ui-monospace,SFMono-Regular,monospace}
+    .ghost,.primary,.danger{border:1px solid #4a5876;border-radius:9px;background:#25314c;color:#e8edfb;padding:8px 11px;text-decoration:none;font-size:12px;white-space:nowrap}
+    .ghost:hover{background:#344464}.primary{background:#a9b9ff;border-color:#a9b9ff;color:#11192d;font-weight:750}.primary:hover{background:#c2ceff}.danger{border-color:#995d6c;background:#4a2d38;color:#ffdce3}
+    .ghost:disabled,.primary:disabled,.danger:disabled{opacity:.5;cursor:wait}
+    .nav-toggle{position:fixed;left:292px;top:50%;transform:translateY(-50%);z-index:40;border:1px solid #596991;border-left:0;border-radius:0 10px 10px 0;background:#34496d;color:#fff;padding:13px 6px;writing-mode:vertical-rl;letter-spacing:.08em}
+    .scene-nav{position:fixed;inset:0 auto 0 0;width:292px;background:#151d30;border-right:1px solid #34425f;z-index:35;display:flex;flex-direction:column;box-shadow:7px 0 25px #0003;transition:transform .2s}
+    .nav-closed .scene-nav{transform:translateX(-100%)}.nav-closed .nav-toggle{left:0}
+    .nav-head{padding:20px 16px 12px;border-bottom:1px solid #303c56}.nav-head strong{display:block;font-size:16px}.nav-head span{display:block;margin-top:4px}.nav-jump{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:13px}.nav-jump input{min-width:0}.nav-search{padding:12px 13px;display:grid;gap:8px;border-bottom:1px solid #303c56}
+    input,select,textarea{background:#10182a;color:#edf2ff;border:1px solid #4b5a79;border-radius:8px;padding:8px 9px;outline:none}input:focus,select:focus,textarea:focus{border-color:#a5b9ff;box-shadow:0 0 0 2px #788cdb44}
+    .scene-list{overflow:auto;min-height:0;flex:1;padding:8px}.scene-nav-item{display:flex;width:100%;align-items:center;text-align:left;border:1px solid transparent;border-radius:10px;background:transparent;color:#d3dff6;padding:10px;gap:9px;margin-bottom:4px}
+    .scene-nav-item:hover,.scene-nav-item.active{background:#263653;border-color:#5e719c}.scene-nav-item .number{font-weight:750;min-width:36px;color:#a9b9ff}.scene-nav-item .summary{min-width:0;flex:1}.scene-nav-item .time{display:block;color:#91a2c5;font-size:10px}.scene-nav-item .prompt{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;margin-top:3px}.scene-nav-item .state{font-size:10px;border-radius:99px;background:#465373;padding:3px 5px;white-space:nowrap}.scene-nav-item .state.ready{background:#4b6037;color:#e1ffc2}.scene-nav-item .state.running{background:#66502e;color:#ffdda4}
+    .workspace{margin-left:292px;min-height:100vh;padding:20px 26px 48px;transition:margin-left .2s}.nav-closed .workspace{margin-left:36px}.workspace-inner{max-width:1440px;margin:auto}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}.topbar h1{font-size:19px;margin:0 0 4px}.top-actions,.row-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+    .banner{border:1px solid #4e628a;background:#20324e;border-radius:10px;padding:11px 13px;margin:10px 0;font-size:12px;line-height:1.5}.banner.error{border-color:#a45766;background:#4b2c38;color:#ffdde3}.banner.success{border-color:#4b8d73;background:#1b4237;color:#bdf6db}
+    #notice{position:fixed;top:14px;right:18px;z-index:60;max-width:min(480px,calc(100vw - 36px));box-shadow:0 14px 34px #0009}
+    .scene-head,.panel{border:1px solid #34425e;border-radius:13px;background:#192237}.scene-head{padding:16px 18px;margin-bottom:13px}
+    .scene-head-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.scene-head h2{font-size:20px;margin:0 0 5px}.scene-head p{font-size:12px;color:#b5c2dc;line-height:1.55;margin:4px 0 0;max-height:76px;overflow:auto}
+    .badge{display:inline-block;border-radius:99px;background:#344767;color:#d0ddff;padding:4px 8px;font-size:10px}.layer-tabs{display:flex;gap:7px;margin:0 0 13px;overflow:auto}.layer-tab{border:1px solid #415171;border-radius:9px;background:#1a2741;color:#c1d0ec;padding:9px 13px;white-space:nowrap}.layer-tab.active{background:#a9b9ff;color:#17213b;border-color:#a9b9ff;font-weight:700}
+    .scene-layout{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(360px,.85fr);gap:13px;align-items:start}.preview-panel{position:sticky;top:13px;min-width:0}.panel{padding:15px;min-width:0}.panel h3{font-size:14px;margin:0 0 10px}
+    .image{display:block;width:100%;height:min(54vh,550px);min-height:260px;object-fit:contain;background:repeating-conic-gradient(#273248 0 25%,#1a2436 0 50%) 50%/24px 24px;border:1px solid #384862;border-radius:9px}
+    .empty-image{display:grid;place-items:center;color:#9baac8}.path{overflow-wrap:anywhere}.editor-panel{display:grid;gap:13px}.editor-panel label{display:block;color:#c4d0e8;font-size:12px;margin:0 0 6px}.editor-panel textarea{width:100%;resize:vertical;min-height:70px;font:12px/1.55 ui-monospace,SFMono-Regular,monospace}
+    .editor-panel details{border-top:1px solid #34425e;padding-top:11px}.editor-panel details summary,.activity summary{cursor:pointer;color:#d7e3ff;font-size:12px;font-weight:700}.editor-panel details textarea{margin-top:9px;min-height:125px}.checkbox{display:flex!important;gap:8px;align-items:center;margin:4px 0!important}.checkbox input{width:16px;height:16px}
+    .effect-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.effect-grid select{width:100%;font-size:12px}.upload{position:relative;overflow:hidden}.upload input{position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}.cutout-command{white-space:pre-wrap;overflow-wrap:anywhere;max-height:110px;overflow:auto;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;color:#aebddd}
+    .candidate{margin-top:13px;border-top:1px solid #3a4968;padding-top:12px}.candidate h3{margin-bottom:5px}.compare{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}.compare figure{margin:0;min-width:0}.compare figcaption{color:#a7b8d7;font-size:11px;margin-bottom:5px}.compare img{width:100%;height:min(48vh,500px);object-fit:contain;border:1px solid #3e4f70;border-radius:8px;background:#111a2b}.candidate .row-actions{margin-top:10px}
+    .activity{margin-top:14px}.activity summary{font-size:13px}.activity-list{max-height:400px;overflow:auto;margin-top:10px}.activity-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0;border-top:1px solid #34425e;font-size:11px}.activity-row button{white-space:normal;text-align:left}.activity-row small{color:#a6b6d3}.activity-row .error-text{color:#ffb5c0}
+    @media(max-width:1100px){.scene-layout{grid-template-columns:1fr}.preview-panel{position:static}.image{height:45vh}}
+    @media(max-width:900px){.workspace,.nav-closed .workspace{margin-left:32px;padding:14px 12px 36px}.scene-nav{width:min(292px,calc(100vw - 38px))}.nav-toggle{left:min(292px,calc(100vw - 38px))}.topbar{align-items:flex-start}.top-actions{justify-content:flex-end}.scene-head-top{display:block}}
+    @media(max-width:560px){.topbar{display:block}.top-actions{margin-top:11px}.compare img{height:150px}.effect-grid{grid-template-columns:1fr 1fr}.panel{padding:12px}}
+  </style>
+</head>
+<body>
+<button id="nav-toggle" class="nav-toggle" type="button" aria-controls="scene-nav" aria-expanded="true">场景跳转</button>
+<aside id="scene-nav" class="scene-nav" aria-label="场景导航">
+  <div class="nav-head"><strong>场景导航</strong><span id="nav-count" class="muted">读取中…</span>
+    <div class="nav-jump"><button id="previous" class="ghost" type="button">上一段</button><input id="jump-input" type="number" min="1" aria-label="场景编号" placeholder="编号"><button id="jump" class="ghost" type="button">跳转</button></div>
+  </div>
+  <div class="nav-search"><input id="scene-search" type="search" placeholder="搜索编号、时间或提示词" aria-label="搜索场景"><select id="scene-filter" aria-label="筛选场景"><option value="all">全部场景</option><option value="ready">待确认候选</option><option value="active">处理中 / 失败</option></select></div>
+  <div id="scene-list" class="scene-list"></div>
+</aside>
+<main class="workspace"><div class="workspace-inner">
+  <header class="topbar"><div><h1>场景图片编辑</h1><div class="muted">每次查看一个场景；生图在后台排队，切换场景时输入内容会保留。</div></div><div class="top-actions"><button id="refresh" class="ghost" type="button">刷新</button><a class="ghost" href="/">主页面</a></div></header>
+  <div id="notice" class="banner hidden" role="status"></div>
+  <div id="sync" class="banner hidden"></div>
+  <div id="scene-current"></div>
+  <details id="activity" class="panel activity"><summary>后台任务 <span id="activity-count"></span></summary><div id="tasks" class="activity-list"></div></details>
+</div></main>
+<script>
+  const jobId = {{ job_id|tojson }};
+  const apiBase = '/api/jobs/' + encodeURIComponent(jobId) + '/editor';
+  const $ = id => document.getElementById(id);
+  const labels = {image:'场景原图',background:'空背景',foreground:'透明人物'};
+  const statuses = {queued:'排队中',running:'处理中',ready:'待确认',accepted:'已替换',discarded:'已舍弃',failed:'失败',completed:'已完成'};
+  const choices = {fade:[['none','无'],['in','淡入'],['out','淡出'],['in_out','淡入并淡出']],horizontal:[['none','无'],['left','向左'],['right','向右']],vertical:[['none','无'],['up','向上'],['down','向下']],zoom:[['none','无'],['in','推近'],['out','拉远']]};
+  let inventory = null;
+  let selectedScene = Number(new URLSearchParams(location.search).get('scene')) || 1;
+  let selectedLayer = 'image';
+  let candidateSignature = '';
+  const drafts = new Map();
+  const candidateSelections = new Map();
+  function node(tag, className, content) {const item=document.createElement(tag);if(className)item.className=className;if(content!==undefined)item.textContent=content;return item}
+  function notice(message, bad=false) {const box=$('notice');box.textContent=message;box.className='banner '+(bad?'error':'success');if(!message)box.classList.add('hidden')}
+  async function api(url, options={}) {const response=await fetch(url,options);if(!(response.headers.get('content-type')||'').includes('application/json'))throw new Error('服务器返回非 JSON 响应（HTTP '+response.status+'）');let data;try{data=await response.json()}catch{throw new Error('服务器响应无法解析')}if(!response.ok)throw new Error(data.error||'请求失败');return data}
+  function request(method,url,data) {return api(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
+  function currentScene() {return inventory?.scenes.find(scene=>scene.index===selectedScene)}
+  function draftKey() {return selectedScene+':'+selectedLayer}
+  function draft() {if(!drafts.has(draftKey()))drafts.set(draftKey(),{});return drafts.get(draftKey())}
+  function sceneTask(index) {return inventory?.tasks.find(task=>task.scene===index&&['ready','running','queued','failed'].includes(task.status))}
+  function sceneSummary(scene) {const match=(scene.prompt||'').match(/场景[:：]([^。\n]+)/);return match?match[1].trim():(scene.prompt||'未设置提示词').slice(0,100)}
+  function setNav(open) {document.body.classList.toggle('nav-closed',!open);$('nav-toggle').setAttribute('aria-expanded',String(open))}
+  function selectScene(index,layer='image') {if(!inventory?.scenes.some(scene=>scene.index===index))return;selectedScene=index;selectedLayer=layer;history.replaceState(null,'',location.pathname+'?scene='+index);$('jump-input').value=index;renderNav();$('scene-list').querySelector('.active')?.scrollIntoView({block:'nearest'});renderCurrent();window.scrollTo({top:0,behavior:'auto'});if(innerWidth<=900)setNav(false)}
+  function renderNav() {
+    if(!inventory)return;
+    const list=$('scene-list'),scroll=list.scrollTop,query=$('scene-search').value.trim().toLowerCase(),filter=$('scene-filter').value;
+    $('nav-count').textContent='当前 '+selectedScene+' / '+inventory.scenes.length+' 段';
+    $('previous').disabled=selectedScene<=1;
+    list.replaceChildren();
+    for(const scene of inventory.scenes){
+      const task=sceneTask(scene.index);
+      if(filter==='ready'&&task?.status!=='ready')continue;
+      if(filter==='active'&&!['running','queued','failed'].includes(task?.status))continue;
+      if(query&&!String(scene.index).includes(query)&&!(scene.start.toFixed(1)).includes(query)&&!scene.prompt.toLowerCase().includes(query))continue;
+      const item=node('button','scene-nav-item'+(scene.index===selectedScene?' active':''));item.type='button';item.onclick=()=>selectScene(scene.index);
+      item.append(node('span','number',String(scene.index)));
+      const summary=node('span','summary');summary.append(node('span','time',scene.start.toFixed(1)+'–'+scene.end.toFixed(1)+' 秒'),node('span','prompt',sceneSummary(scene)));item.append(summary);
+      if(task)item.append(node('span','state '+task.status,statuses[task.status]));list.append(item)
+    }
+    if(!list.children.length)list.append(node('p','hint','没有符合条件的场景'));
+    list.scrollTop=scroll;
+  }
+  function effectControls(values) {const grid=node('div','effect-grid'),fields={};for(const [group,items] of Object.entries(choices)){const wrap=node('div'),label=node('label','',({fade:'淡入淡出',horizontal:'水平',vertical:'垂直',zoom:'推近拉远'})[group]),select=node('select');for(const [value,title] of items)select.add(new Option(title,value));select.value=values?.[group]||'none';wrap.append(label,select);grid.append(wrap);fields[group]=select}return {grid,read:()=>Object.fromEntries(Object.entries(fields).map(([key,value])=>[key,value.value]))}}
+  function setX2Command(command,enabled) {const config=' --config-json \'{"upscaler":"realesrgan_x2plus_f16.ckpt","upscalerScaleFactor":2}\'';const base=command.value.replace(config,'');command.value=enabled?base+config:base}
+  function renderCurrent() {
+    const scene=currentScene(),host=$('scene-current');host.replaceChildren();candidateSignature='';
+    if(!scene){host.append(node('div','panel','没有场景数据'));return}
+    if(!scene.layers.some(layer=>layer.name===selectedLayer))selectedLayer=scene.layers[0]?.name||'image';
+    const head=node('section','scene-head'),top=node('div','scene-head-top'),title=node('div');
+    title.append(node('h2','', '场景 '+scene.index+' · '+scene.start.toFixed(1)+'–'+scene.end.toFixed(1)+' 秒'),node('span','badge',scene.motion));
+    const nav=node('div','row-actions'),previous=node('button','ghost','上一段'),next=node('button','ghost','下一段');previous.disabled=scene.index<=1;previous.onclick=()=>selectScene(scene.index-1);next.disabled=scene.index>=inventory.scenes.length;next.onclick=()=>selectScene(scene.index+1);nav.append(previous,next);top.append(title,nav);head.append(top,node('p','',scene.prompt||'无画面提示词'));host.append(head);
+    const tabs=node('div','layer-tabs');for(const layer of scene.layers){const button=node('button','layer-tab'+(layer.name===selectedLayer?' active':''),layer.name==='image'&&scene.motion==='parallax'?'人物源图':labels[layer.name]);button.type='button';button.onclick=()=>{selectedLayer=layer.name;renderCurrent()};tabs.append(button)}host.append(tabs);
+    const layer=scene.layers.find(item=>item.name===selectedLayer)||scene.layers[0];if(!layer)return;selectedLayer=layer.name;
+    const layout=node('div','scene-layout'),preview=node('section','panel preview-panel'),edit=node('section','panel editor-panel');
+    preview.append(node('h3','',layer.name==='image'&&scene.motion==='parallax'?'人物源图':labels[layer.name]));
+    const originalSlot=node('div');originalSlot.id='current-preview';
+    if(layer.url){const image=node('img','image');image.src=layer.url+'?v='+Date.now();image.alt='场景 '+scene.index+' '+labels[layer.name];originalSlot.append(image)}
+    else originalSlot.append(node('div','image empty-image','图片暂不可预览'));
+    preview.append(originalSlot);
+    const candidate=node('div','candidate');candidate.id='candidate';preview.append(candidate);
+    if(layer.source)preview.append(node('p','hint path',layer.source));
+    layout.append(preview);
+    const sceneSettings=node('details');sceneSettings.append(node('summary','','场景运镜与主角出镜'));
+    const sceneBody=node('div');sceneBody.style.marginTop='10px';
+    const preset=node('select');for(const [value,label] of [['static','静止'],['push_in','推近'],['pull_out','拉远'],['pan_left','向左'],['pan_right','向右'],['parallax','分层视差']])preset.add(new Option(label,value));preset.value=scene.motion;
+    const presentLabel=node('label','checkbox','主角在画面中'),present=node('input');present.type='checkbox';present.checked=!!scene.character_present;presentLabel.prepend(present);
+    const saveScene=node('button','ghost','保存场景设置');saveScene.onclick=async()=>{saveScene.disabled=true;try{await request('PATCH',apiBase+'/motion/'+scene.index+'/image',{effects:scene.motion_effects||{},motion:preset.value,character_present:present.checked});notice('场景设置已保存，输出将在后台重建');await refresh(true)}catch(e){notice(e.message,true)}finally{saveScene.disabled=false}};
+    sceneBody.append(preset,presentLabel,saveScene);if(scene.motion_reason)sceneBody.append(node('p','hint',scene.motion_reason));sceneSettings.append(sceneBody);edit.append(sceneSettings);
+    const sourceOnly=scene.motion==='parallax'&&layer.name==='image';
+    if(!sourceOnly){const effects=node('div');effects.append(node('label','','此图层动效'));const controls=effectControls(layer.motion_effects);effects.append(controls.grid);const saveMotion=node('button','ghost','保存动效');saveMotion.style.marginTop='9px';saveMotion.onclick=async()=>{saveMotion.disabled=true;try{await request('PATCH',apiBase+'/motion/'+scene.index+'/'+layer.name,{effects:controls.read()});notice('动效已保存，输出将在后台重建');await refresh(true)}catch(e){notice(e.message,true)}finally{saveMotion.disabled=false}};effects.append(saveMotion);edit.append(effects)}
+    else edit.append(node('p','hint','人物源图用于抠图，不直接进入视频。'));
+    if(layer.derived)edit.append(node('p','hint','透明人物由源图抠出。上传替换时请使用透明 PNG。'));
+    const refsLabel=node('label','','参考图路径（每行一张；可留空）'),refs=node('textarea');refs.id='reference-paths';refs.placeholder='例如 /Users/you/Pictures/character.png';refs.value=drafts.get(draftKey())?.references??(layer.references||[]).join('\n');refs.oninput=()=>{draft().references=refs.value;draft().referencesDirty=true};edit.append(refsLabel,refs,node('p','hint','支持 PNG、JPEG、WebP；相对路径从项目目录计算。修改后点“重新生成候选图”。'));
+    const advanced=node('details'),command=node('textarea');command.spellcheck=false;command.value=drafts.get(draftKey())?.command??layer.command;command.oninput=()=>{draft().command=command.value};advanced.append(node('summary','','Draw Things 完整命令（可编辑模型、提示词、尺寸、seed、--image）'),command);if(layer.cutout_command)advanced.append(node('pre','cutout-command',layer.cutout_command));edit.append(advanced);
+    const upscaleLabel=node('label','checkbox','使用 Real-ESRGAN X2+ 放大'),upscale=node('input');upscale.type='checkbox';upscale.checked=command.value.includes('realesrgan_x2plus_f16.ckpt');upscale.onchange=()=>{setX2Command(command,upscale.checked);command.oninput()};upscaleLabel.prepend(upscale);edit.append(upscaleLabel);
+    const actions=node('div','row-actions'),generate=node('button','primary','重新生成候选图');generate.onclick=async()=>{generate.disabled=true;try{const payload={scene:scene.index,layer:layer.name,command:command.value};const saved=drafts.get(draftKey());if(saved?.referencesDirty)payload.references=refs.value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);await request('POST',apiBase+'/candidates/generate',payload);notice('已加入后台生图队列');await refresh(false)}catch(e){notice(e.message,true)}finally{generate.disabled=false}};
+    const upload=node('label','ghost upload','上传图片替换'),file=node('input');file.type='file';file.accept='image/png,image/jpeg,image/webp';file.onchange=async()=>{if(!file.files?.length)return;const form=new FormData();form.append('scene',scene.index);form.append('layer',layer.name);form.append('file',file.files[0]);try{await api(apiBase+'/candidates/upload',{method:'POST',body:form});notice('图片已上传，正在后台校验');await refresh(false)}catch(e){notice(e.message,true)}file.value=''};upload.append(file);actions.append(generate,upload);edit.append(actions);
+    layout.append(edit);host.append(layout);renderCandidate();
+  }
+  function renderCandidate() {
+    const host=$('candidate');if(!host||!inventory)return;
+    const tasks=inventory.tasks.filter(task=>task.scene===selectedScene&&task.layer===selectedLayer&&task.kind!=='rebuild'&&['ready','queued','running','failed'].includes(task.status));
+    const key=selectedScene+':'+selectedLayer,ready=tasks.filter(item=>item.status==='ready');
+    const task=ready.find(item=>item.id===candidateSelections.get(key))||ready[0]||tasks[0];
+    const signature=tasks.map(item=>item.id+':'+item.status+':'+(item.progress??'')).join('|')+'#'+(task?.id||'');
+    if(signature===candidateSignature)return;candidateSignature=signature;host.replaceChildren();host.classList.toggle('hidden',!tasks.length);
+    $('current-preview').classList.toggle('hidden',!!ready.length);
+    if(!tasks.length)return;
+    const box=node('div','candidate-item');box.append(node('h3','',statuses[task.status]+(Number.isFinite(task.progress)?' '+task.progress+'%':'')));
+    if(ready.length>1){const picker=node('select');picker.setAttribute('aria-label','选择候选图片');for(const item of ready)picker.add(new Option('候选 '+item.id.slice(0,6),item.id));picker.value=task.id;picker.onchange=()=>{candidateSelections.set(key,picker.value);candidateSignature='';renderCandidate()};box.append(picker)}
+      if(task.error)box.append(node('p','hint',task.error));
+      if(task.status==='ready'){
+        const scene=currentScene(),layer=scene.layers.find(item=>item.name===selectedLayer),compare=node('div','compare');
+        for(const [caption,url] of [['当前图片',layer?.url],['新候选图',task.url]]){const figure=node('figure');figure.append(node('figcaption','',caption));if(url){const img=node('img');img.src=url+'?v='+task.id;img.alt=caption;figure.append(img)}else figure.append(node('div','empty-image','暂无图片'));compare.append(figure)}
+        box.append(compare);
+        const actions=node('div','row-actions'),accept=node('button','primary','采用新图'),discard=node('button','danger','舍弃候选');
+        accept.onclick=async()=>{accept.disabled=true;try{await request('POST',apiBase+'/candidates/'+task.id+'/accept',{});drafts.delete(key);notice('新图已采用，输出将在后台重建');await refresh(true)}catch(e){notice(e.message,true);accept.disabled=false}};
+        discard.onclick=async()=>{discard.disabled=true;try{await request('POST',apiBase+'/candidates/'+task.id+'/discard',{});notice('已保留原图');await refresh(false)}catch(e){notice(e.message,true);discard.disabled=false}};
+        actions.append(accept,discard);box.append(actions)
+      }
+    host.append(box)
+  }
+  function renderTasks() {
+    const host=$('tasks');host.replaceChildren();const active=inventory.tasks.filter(task=>['queued','running','ready','failed'].includes(task.status));$('activity-count').textContent=active.length?'（'+active.length+' 项需留意）':'（无待办）';
+    if(!inventory.tasks.length){host.append(node('p','hint','暂无后台任务'));return}
+    for(const task of inventory.tasks.slice(0,30)){
+      const row=node('div','activity-row'),button=node('button','ghost',task.kind==='rebuild'?'重建输出':'场景 '+task.scene+' · '+(labels[task.layer]||task.layer));
+      button.onclick=()=>selectScene(task.scene,task.layer);row.append(button,node('span','',statuses[task.status]+(Number.isFinite(task.progress)?' '+task.progress+'%':'')));
+      if(task.error)row.append(node('small','error-text',task.error));
+      if(task.kind==='rebuild'&&task.status==='failed'){const retry=node('button','ghost','重试');retry.onclick=async()=>{retry.disabled=true;try{await request('POST',apiBase+'/rebuild',{});notice('已重新加入队列');await refresh(false)}catch(e){notice(e.message,true);retry.disabled=false}};row.append(retry)}
+      host.append(row)
+    }
+  }
+  function renderSync() {
+    const box=$('sync');box.replaceChildren();box.classList.toggle('hidden',!inventory.needs_sync);if(!inventory.needs_sync)return;
+    box.append(node('span','','本地草稿已修改。同步后会在剪映中创建带编号的新草稿。 '));
+    const latest=inventory.tasks.find(task=>task.kind==='rebuild'),button=node('button','primary',latest?.status==='completed'?'同步到剪映':'等待重建完成');
+    button.disabled=latest?.status!=='completed';button.onclick=async()=>{button.disabled=true;try{const result=await request('POST',apiBase+'/sync-jianying',{});notice('已注册新草稿：'+result.registered_draft);await refresh(false)}catch(e){notice(e.message,true);button.disabled=false}};box.append(button)
+  }
+  async function refresh(full=false) {try{inventory=(full||!inventory)?await api(apiBase):{...inventory,...await api(apiBase+'/tasks')};if(!inventory.scenes.some(scene=>scene.index===selectedScene))selectedScene=inventory.scenes[0]?.index||1;renderNav();if(full||!$('scene-current').children.length)renderCurrent();else renderCandidate();renderTasks();renderSync()}catch(e){notice(e.message,true)}}
+  $('nav-toggle').onclick=()=>setNav(document.body.classList.contains('nav-closed'));
+  $('previous').onclick=()=>selectScene(selectedScene-1);
+  $('jump').onclick=()=>selectScene(Number($('jump-input').value));
+  $('jump-input').onkeydown=event=>{if(event.key==='Enter')$('jump').click()};
+  $('scene-search').oninput=renderNav;$('scene-filter').onchange=renderNav;
+  $('refresh').onclick=()=>refresh(true);
+  if(innerWidth<=900)setNav(false);
+  refresh(true);setInterval(()=>refresh(false),2500);
+</script>
+</body>
+</html>

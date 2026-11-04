@@ -91,17 +91,18 @@ class SceneEditor:
                 return records[index - 1]
         return {}
 
-    def _params(self, folder: Path, index: int, layer: str) -> dict:
-        scene = self._scene(folder, index)
-        record = self._record(folder, index)
-        job = self.manager.get(folder.name)
-        options = job.get("options", {})
+    def _params(self, folder: Path, index: int, layer: str, *,
+                scene: dict | None = None, record: dict | None = None,
+                options: dict | None = None) -> dict:
+        scene = scene if scene is not None else self._scene(folder, index)
+        record = record if record is not None else self._record(folder, index)
+        options = options if options is not None else self.manager.get(folder.name).get("options", {})
         background_record = {}
         if layer == "background":
             metadata = folder / "images" / f"scene_{index:03}_background.request.json"
             background_record = json.loads(metadata.read_text(encoding="utf-8")) if metadata.is_file() else {}
             prompt = background_record.get("prompt") or scene["prompt"] + "\nEmpty environment, no people, no text."
-            references = []
+            references = background_record.get("references") or []
             width = int(background_record.get("width") or record.get("width") or options.get("width") or 1280)
             height = int(background_record.get("height") or record.get("height") or options.get("height") or 720)
             existing = scene.get("background")
@@ -119,7 +120,7 @@ class SceneEditor:
             references = record.get("references") or []
             width = int(record.get("width") or options.get("width") or 1280)
             height = int(record.get("height") or options.get("height") or 720)
-            if scene.get("character_present") and not references:
+            if scene.get("character_present") and not references and not record.get("references_customized"):
                 snapshot = folder / "character_reference"
                 refs = [snapshot / name for name in ("front.png", "three_quarter.png", "full_body.png")]
                 references = [str(path) for path in refs if path.is_file()]
@@ -128,10 +129,6 @@ class SceneEditor:
                     name = json.loads(profile.read_text(encoding="utf-8")).get("name", "主角")
                     prompt = compose_scene_prompt(scene["prompt"], str(options.get("image_prompt_suffix") or ""),
                                                   name, True, True)
-            elif not scene.get("character_present") and references:
-                references = []
-                prompt = compose_scene_prompt(scene["prompt"], str(options.get("image_prompt_suffix") or ""),
-                                              "", False, False)
         source_record = background_record or record
         upscale_x2 = bool(source_record.get("upscale_x2", options.get("upscale_x2", False)))
         if layer != "foreground" and (layer == "background" or scene.get("motion") != "parallax"):
@@ -153,7 +150,8 @@ class SceneEditor:
                 "width": width, "height": height, "steps": source_record.get("steps") or record.get("steps") or options.get("image_steps"),
                 "seed": source_record.get("seed") if source_record.get("seed") is not None else
                 (record.get("seed") if record.get("seed") is not None else options.get("image_seed", 271829)),
-                "references": references, "output": target, "upscale_x2": upscale_x2}
+                "references": references, "references_customized": bool(source_record.get("references_customized")),
+                "output": target, "upscale_x2": upscale_x2}
 
     def _command(self, params: dict) -> str:
         args = [str(cli_path()), "generate", "--local", "--offline", "--no-download-missing",
@@ -170,7 +168,7 @@ class SceneEditor:
             args += ["--image", str(path)]
         return shlex.join(args)
 
-    def _parse_command(self, text: str, original: dict) -> dict:
+    def _parse_command(self, text: str, original: dict, *, validate_references: bool = True) -> dict:
         if len(text) > 20_000:
             raise ValueError("Draw Things 命令不能超过 20000 个字符")
         try:
@@ -201,9 +199,8 @@ class SceneEditor:
             i += 2
         if found.get("--output") != original["output"]:
             raise ValueError("输出路径不能修改；候选图片由系统另存")
-        references = found.get("--image", [])
-        if references != original["references"]:
-            raise ValueError("参考图路径不能修改")
+        references = (self._validate_references(found.get("--image", [])) if validate_references else
+                      found.get("--image", []))
         try:
             width, height = int(found["--width"]), int(found["--height"])
             seed = int(found["--seed"]) if "--seed" in found else None
@@ -237,9 +234,35 @@ class SceneEditor:
                 "steps": steps, "seed": seed, "references": references, "output": original["output"],
                 "upscale_x2": upscale_x2}
 
+    def _validate_references(self, references: list[str]) -> list[str]:
+        if not isinstance(references, list) or len(references) > 8 or any(
+                not isinstance(path, str) or not path.strip() for path in references):
+            raise ValueError("参考图路径须为图片列表，最多 8 张")
+        checked = []
+        for raw in references:
+            path = Path(raw.strip()).expanduser()
+            if not path.is_absolute():
+                path = self.manager.root / path
+            path = path.resolve()
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or not path.is_file():
+                raise ValueError(f"参考图不存在或格式不支持：{raw}")
+            try:
+                probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                        "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+                                       capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ValueError(f"无法读取参考图：{raw}") from exc
+            if probe.returncode or not probe.stdout.strip():
+                raise ValueError(f"参考图不是有效图片：{raw}")
+            checked.append(str(path))
+        return checked
+
     def inventory(self, job_id: str) -> dict:
         folder = self._folder(job_id)
         scenes = self._scenes(folder)
+        record_path = folder / "image_generation.json"
+        records = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else []
+        options = self.manager.get(job_id).get("options", {})
         result = []
         for i, scene in enumerate(scenes, 1):
             layers = []
@@ -247,7 +270,8 @@ class SceneEditor:
                 if layer != "image" and not (scene.get(layer) or scene.get("motion") == "parallax"):
                     continue
                 path = scene.get(layer)
-                params = self._params(folder, i, layer)
+                params = self._params(folder, i, layer, scene=scene,
+                                      record=records[i - 1] if i <= len(records) else {}, options=options)
                 local = bool(path and Path(path).resolve().is_relative_to(folder.resolve()))
                 cutout_command = None
                 if layer == "foreground":
@@ -256,6 +280,7 @@ class SceneEditor:
                                                   str(path or folder / "images" / f"scene_{i:03}_foreground.png")])
                 layers.append({"name": layer, "url": f"/api/jobs/{job_id}/editor/assets/{i}/{layer}" if local else None,
                                "command": self._command(params), "source": path,
+                               "references": params["references"],
                                "cutout_command": cutout_command,
                                "derived": layer == "foreground",
                                "upscale_x2": params["upscale_x2"],
@@ -273,7 +298,11 @@ class SceneEditor:
         tasks = [json.loads(p.read_text(encoding="utf-8")) for p in tasks_dir.glob("*.json")] if tasks_dir.is_dir() else []
         tasks.sort(key=lambda task: task.get("created", ""), reverse=True)
         job = self.manager.get(job_id)
-        return {"tasks": tasks[:100], "registered_draft": job.get("registered_draft"),
+        active = [task for task in tasks if task.get("status") in ("queued", "running", "ready", "failed")]
+        recent = [task for task in tasks if task.get("status") not in ("queued", "running", "ready", "failed")][:100]
+        visible = active + recent
+        visible.sort(key=lambda task: task.get("created", ""), reverse=True)
+        return {"tasks": visible, "registered_draft": job.get("registered_draft"),
                 "needs_sync": bool(job.get("registered_draft") and (folder / "edits" / "needs_sync").is_file())}
 
     def asset(self, job_id: str, index: int, layer: str) -> Path:
@@ -305,11 +334,18 @@ class SceneEditor:
                 self.pending.put((job_id, task_id))
         return task
 
-    def generate(self, job_id: str, index: int, layer: str, command: str) -> dict:
+    def generate(self, job_id: str, index: int, layer: str, command: str,
+                 references: list[str] | None = None) -> dict:
         folder = self._folder(job_id)
         if layer not in LAYER_KEYS:
             raise ValueError("图层无效")
-        params = self._parse_command(command, self._params(folder, index, layer))
+        original = self._params(folder, index, layer)
+        params = self._parse_command(command, original, validate_references=references is None)
+        changed_in_command = params["references"] != original["references"]
+        if references is not None:
+            params["references"] = self._validate_references(references)
+        params["references_customized"] = bool(original["references_customized"] or
+                                                changed_in_command or references is not None)
         return self._new_task(job_id, index, layer, "generate", params=params)
 
     def upload(self, job_id: str, index: int, layer: str, stream: BinaryIO, filename: str) -> dict:

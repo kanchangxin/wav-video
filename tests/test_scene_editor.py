@@ -57,7 +57,136 @@ class SceneEditorTests(unittest.TestCase):
         self.assertIn("场景图片编辑", html)
         self.assertIn("重新生成候选图", html)
         self.assertIn("同步到剪映", html)
+        self.assertIn('id="scene-nav"', html)
+        self.assertIn('id="scene-current"', html)
+        self.assertIn('id="scene-search"', html)
+        self.assertIn('参考图路径', html)
         self.assertEqual(self.client.get("/api/jobs/testjob/editor/tasks").status_code, 200)
+
+    def test_edited_reference_paths_reach_generation_and_are_saved_on_accept(self):
+        reference = self.root / "new reference.png"
+        shutil.copy2(self.image, reference)
+        layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        self.assertEqual(layer["references"], [])
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)) as generate:
+            response = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "image", "command": layer["command"],
+                "references": [str(reference)]})
+            self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+            task_id = response.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(generate.call_args.kwargs["references"], [reference.resolve()])
+        accepted = self.client.post(f"/api/jobs/testjob/editor/candidates/{task_id}/accept")
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+        record = json.loads((self.output / "image_generation.json").read_text())[0]
+        self.assertEqual(record["references"], [str(reference.resolve())])
+        updated = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        self.assertIn(str(reference.resolve()), updated["command"])
+
+    def test_reference_path_can_be_changed_in_full_command_and_must_be_an_image(self):
+        reference = self.root / "reference.png"
+        shutil.copy2(self.image, reference)
+        layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)) as generate:
+            changed = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "image", "command": layer["command"] + f" --image {reference}"})
+            self.assertEqual(changed.status_code, 202, changed.get_data(as_text=True))
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{changed.get_json()['id']}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(generate.call_args.kwargs["references"], [reference.resolve()])
+        invalid = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+            "scene": 1, "layer": "image", "command": layer["command"],
+            "references": [str(self.root / "missing.png")]})
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("参考图", invalid.get_json()["error"])
+
+    def test_background_reference_path_persists_after_accept(self):
+        reference = self.root / "plate_reference.png"
+        shutil.copy2(self.image, reference)
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scenes[0]["motion"] = "parallax"
+        (self.output / "scenes.json").write_text(json.dumps(scenes))
+        background = next(layer for layer in self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"]
+                          if layer["name"] == "background")
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)):
+            queued = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "background", "command": background["command"],
+                "references": ["plate_reference.png"]})
+            self.assertEqual(queued.status_code, 202, queued.get_data(as_text=True))
+            task_id = queued.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(self.client.post(f"/api/jobs/testjob/editor/candidates/{task_id}/accept").status_code, 200)
+        updated = next(layer for layer in self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"]
+                       if layer["name"] == "background")
+        self.assertEqual(updated["references"], [str(reference.resolve())])
+
+    def test_inventory_supports_more_than_one_hundred_scenes(self):
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scene = scenes[0]
+        scenes = [{**scene, "start": index, "end": index + 1, "prompt": f"scene {index + 1}"}
+                  for index in range(130)]
+        (self.output / "scenes.json").write_text(json.dumps(scenes))
+        response = self.client.get("/api/jobs/testjob/editor")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(len(response.get_json()["scenes"]), 130)
+
+    def test_reference_paths_can_be_cleared_for_character_scene(self):
+        snapshot = self.output / "character_reference"
+        snapshot.mkdir()
+        shutil.copy2(self.image, snapshot / "front.png")
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scenes[0]["character_present"] = True
+        (self.output / "scenes.json").write_text(json.dumps(scenes))
+        layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        self.assertTrue(layer["references"])
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)):
+            response = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "image", "command": layer["command"], "references": []})
+            self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+            task_id = response.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(self.client.post(f"/api/jobs/testjob/editor/candidates/{task_id}/accept").status_code, 200)
+        updated = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        self.assertEqual(updated["references"], [])
+
+    def test_missing_old_reference_can_be_replaced_from_path_field(self):
+        records = json.loads((self.output / "image_generation.json").read_text())
+        records[0]["references"] = [str(self.root / "deleted.png")]
+        (self.output / "image_generation.json").write_text(json.dumps(records))
+        replacement = self.root / "replacement.png"
+        shutil.copy2(self.image, replacement)
+        layer = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"][0]
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: path.write_bytes(self.original)) as generate:
+            response = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "image", "command": layer["command"],
+                "references": [str(replacement)]})
+            self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{response.get_json()['id']}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(generate.call_args.kwargs["references"], [replacement.resolve()])
 
     def test_editor_exposes_and_accepts_x2_upscaler_command(self):
         records = json.loads((self.output / "image_generation.json").read_text())
