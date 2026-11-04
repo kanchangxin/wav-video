@@ -512,6 +512,16 @@ def create_app(project_root: Path | None = None) -> Flask:
         except (ValueError, OSError) as exc:
             return jsonify(error=str(exc)), 400
 
+    @app.patch("/api/jobs/<job_id>/editor/captions/<int:index>")
+    def scene_editor_captions(job_id: str, index: int):
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(editor.update_captions(job_id, index, data.get("captions")))
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, TypeError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
     @app.post("/api/jobs/<job_id>/editor/sync-jianying")
     def scene_editor_sync(job_id: str):
         try:

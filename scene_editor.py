@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
-from audio_video import Scene, compose_scene_prompt, export_jianying, render_mp4, validate_foreground
+from audio_video import Caption, Scene, compose_scene_prompt, export_jianying, render_mp4, validate_foreground, write_srt
 from drawthings_cli import X2_CONFIG, cli_path, generate_image, list_models, upscaler_available
 from jianying_register import register_draft
 from scene_motion import PRESETS, generation_size, normalize_effects
@@ -260,6 +260,9 @@ class SceneEditor:
     def inventory(self, job_id: str) -> dict:
         folder = self._folder(job_id)
         scenes = self._scenes(folder)
+        transcript_path = folder / "transcript.json"
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8")) if transcript_path.is_file() else {}
+        captions = transcript.get("captions", []) if isinstance(transcript, dict) else []
         record_path = folder / "image_generation.json"
         records = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else []
         options = self.manager.get(job_id).get("options", {})
@@ -289,8 +292,52 @@ class SceneEditor:
                            "prompt": scene["prompt"], "character_present": scene.get("character_present", False),
                            "motion": scene.get("motion", "static"), "motion_reason": scene.get("motion_reason", ""),
                            "motion_effects": scene.get("motion_effects", {}),
-                           "foreground_effects": scene.get("foreground_effects", {}), "layers": layers})
+                           "foreground_effects": scene.get("foreground_effects", {}),
+                           "captions": [{"index": j, **caption} for j, caption in enumerate(captions)
+                                        if scene["start"] <= float(caption["start"]) < scene["end"]],
+                           "layers": layers})
         return {"scenes": result, **self.tasks(job_id)}
+
+    def update_captions(self, job_id: str, index: int, edits: list[dict]) -> dict:
+        folder = self._folder(job_id)
+        with self.lock:
+            scene = self._scene(folder, index)
+            path = folder / "transcript.json"
+            if not path.is_file():
+                raise ValueError("此任务没有可编辑的字幕 JSON")
+            transcript = json.loads(path.read_text(encoding="utf-8"))
+            captions = transcript.get("captions", [])
+            if not isinstance(edits, list) or not edits:
+                raise ValueError("请选择要保存的字幕")
+            changed = set()
+            for edit in edits:
+                if not isinstance(edit, dict) or type(edit.get("index")) is not int:
+                    raise ValueError("字幕编号无效")
+                position = edit["index"]
+                if position in changed or not 0 <= position < len(captions):
+                    raise ValueError("字幕编号无效或重复")
+                caption = captions[position]
+                if not scene["start"] <= float(caption["start"]) < scene["end"]:
+                    raise ValueError("字幕不属于当前场景")
+                value = edit.get("text")
+                if not isinstance(value, str) or not value.strip() or len(value) > 500 or "\n" in value or "\r" in value:
+                    raise ValueError("字幕文字须为单行且不超过 500 字")
+                changed.add(position)
+            for edit in edits:
+                captions[edit["index"]]["text"] = edit["text"].strip()
+            prepared = [Caption(float(item["start"]), float(item["end"]), item["text"]) for item in captions]
+            json_pending = path.with_suffix(".json.tmp")
+            srt = folder / "subtitles.srt"
+            srt_pending = srt.with_suffix(".srt.tmp")
+            text = folder / "transcript.txt"
+            text_pending = text.with_suffix(".txt.tmp")
+            json_pending.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_srt(prepared, srt_pending)
+            text_pending.write_text("".join(item.text for item in prepared), encoding="utf-8")
+            json_pending.replace(path)
+            srt_pending.replace(srt)
+            text_pending.replace(text)
+            return {"saved": True, "rebuild": self._queue_rebuild(job_id)}
 
     def tasks(self, job_id: str) -> dict:
         folder = self._folder(job_id)

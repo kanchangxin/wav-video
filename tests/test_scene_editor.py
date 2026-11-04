@@ -33,6 +33,9 @@ class SceneEditorTests(unittest.TestCase):
         (self.output / "image_generation.json").write_text(json.dumps([{"scene": 1, "prompt": "red city",
             "model": "test.ckpt", "width": 320, "height": 192, "steps": 20, "seed": 271829, "references": []}]))
         (self.output / "subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\ntest\n")
+        (self.output / "transcript.json").write_text(json.dumps({"audio": str(self.audio), "duration": 1,
+            "captions": [{"start": 0, "end": 1, "text": "test"}]}))
+        (self.output / "transcript.txt").write_text("test")
         state = {"id": "testjob", "status": "completed", "created_at": "2026-11-01T00:00:00",
                  "finished_at": "2026-11-01T00:01:00", "exit_code": 0, "audio_id": "root:voice.m4a",
                  "audio_name": "voice.m4a", "options": {"output": "assets", "width": 320, "height": 192, "fps": 10}}
@@ -60,8 +63,41 @@ class SceneEditorTests(unittest.TestCase):
         self.assertIn('id="scene-nav"', html)
         self.assertIn('id="scene-current"', html)
         self.assertIn('id="scene-search"', html)
-        self.assertIn('参考图路径', html)
+        self.assertIn('本场景字幕', html)
+        self.assertNotIn('id="reference-paths"', html)
         self.assertEqual(self.client.get("/api/jobs/testjob/editor/tasks").status_code, 200)
+
+    def test_scene_subtitle_edit_updates_transcript_and_srt(self):
+        scene = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]
+        self.assertEqual(scene["captions"], [{"index": 0, "start": 0, "end": 1, "text": "test"}])
+        saved = self.client.patch("/api/jobs/testjob/editor/captions/1", json={
+            "captions": [{"index": 0, "text": "修正错字"}]})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(json.loads((self.output / "transcript.json").read_text())["captions"][0]["text"], "修正错字")
+        self.assertIn("修正错字", (self.output / "subtitles.srt").read_text())
+        self.assertEqual((self.output / "transcript.txt").read_text(), "修正错字")
+        invalid = self.client.patch("/api/jobs/testjob/editor/captions/1", json={
+            "captions": [{"index": 99, "text": "不应保存"}]})
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual((self.output / "transcript.txt").read_text(), "修正错字")
+
+    def test_subtitle_edit_rebuilds_video_and_jianying_draft(self):
+        manager = self.app.extensions["job_manager"]
+        manager.jobs["testjob"]["options"]["output"] = "both"
+        manager._persist(manager.jobs["testjob"])
+        saved = self.client.patch("/api/jobs/testjob/editor/captions/1", json={
+            "captions": [{"index": 0, "text": "新字幕"}]})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        task_id = saved.get_json()["rebuild"]["id"]
+        for _ in range(200):
+            task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+            if task["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.025)
+        self.assertEqual(task["status"], "completed", task)
+        self.assertTrue((self.output / "video.mp4").is_file())
+        draft = Path((self.output / "jianying_draft_path.txt").read_text().strip())
+        self.assertIn("新字幕", (draft / "draft_content.json").read_text())
 
     def test_edited_reference_paths_reach_generation_and_are_saved_on_accept(self):
         reference = self.root / "new reference.png"
