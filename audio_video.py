@@ -19,8 +19,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from drawthings_cli import generate_image, upscaler_available
-from scene_motion import LLM_PRESETS, PRESETS, choose_preset, generation_size, motion_for, normalize_effects
+from drawthings_cli import generate_image, list_models, upscaler_available
+from parallax_layers import apply_foreground_mask, background_prompt as parallax_background_prompt, foreground_prompt as parallax_foreground_prompt, foreground_mode, preferred_edit_model
+from scene_motion import (LLM_PRESETS, PARALLAX_BACKGROUND_EFFECTS, PARALLAX_FOREGROUND_EFFECTS,
+                          PARALLAX_PLACEMENTS, PRESETS, choose_preset, generation_size, motion_for,
+                          normalize_effects, parallax_scene_numbers, parse_scene_numbers)
 
 
 @dataclass
@@ -43,6 +46,12 @@ class Scene:
     motion_reason: str = ""
     motion_effects: dict[str, str] = field(default_factory=dict)
     foreground_effects: dict[str, str] = field(default_factory=dict)
+    foreground_method: str = ""
+    independent_layer_motion: bool = False
+
+    @property
+    def background_motion_preset(self) -> str:
+        return "static" if self.motion == "parallax" and self.independent_layer_motion else self.motion
 
 
 def compose_scene_prompt(prompt: str, suffix: str, character_name: str,
@@ -78,9 +87,12 @@ def image_cache_matches(metadata: Path, fingerprint: str) -> bool:
 
 def validate_foreground(path: Path) -> None:
     """Reject almost empty or opaque masks before using a cutout as a layer."""
-    result = run(["ffmpeg", "-v", "error", "-i", str(path), "-vf",
-                  "alphaextract,signalstats,metadata=print:file=-", "-frames:v", "1", "-f", "null", "-"],
-                 capture_output=True, text=True)
+    try:
+        result = run(["ffmpeg", "-v", "error", "-i", str(path), "-vf",
+                      "alphaextract,signalstats,metadata=print:file=-", "-frames:v", "1", "-f", "null", "-"],
+                     capture_output=True, text=True)
+    except RuntimeError as exc:
+        raise RuntimeError("前景图片没有可用的透明通道；请用透明 PNG 或重新生成") from exc
     match = re.search(r"lavfi\.signalstats\.YAVG=([\d.]+)", result.stdout)
     if not match or not 3 <= float(match.group(1)) <= 220:
         raise RuntimeError("人物抠图透明度异常，可能未识别出完整人物")
@@ -554,11 +566,17 @@ def prepare_images(scenes: list[Scene], output: Path, width: int, height: int) -
     return result
 
 
+def parallax_layers_ready(scene: Scene) -> bool:
+    return (scene.motion == "parallax" and bool(scene.background and Path(scene.background).is_file())
+            and bool(scene.foreground and Path(scene.foreground).is_file())
+            and (foreground_mode(scene.prompt) != "ai" or scene.foreground_method in {"ai", "upload"}))
+
+
 def prepare_foregrounds(scenes: list[Scene], output: Path, width: int, height: int) -> list[Path | None]:
     output.mkdir(parents=True, exist_ok=True)
     result = []
     for i, scene in enumerate(scenes):
-        if scene.motion != "parallax" or not scene.foreground or not Path(scene.foreground).is_file():
+        if not parallax_layers_ready(scene):
             result.append(None)
             continue
         normalized = output / f"foreground_{i:03}.png"
@@ -577,11 +595,11 @@ def prepare_motion_backgrounds(scenes: list[Scene], output: Path, width: int, he
          f"color=c=black:s={width}x{height}:d=0.04", "-frames:v", "1", str(black)])
     result = []
     for i, scene in enumerate(scenes):
-        source = scene.background or scene.image
+        source = scene.background if parallax_layers_ready(scene) else scene.image
         if not source or not Path(source).is_file():
             result.append(black)
             continue
-        canvas_width, canvas_height = generation_size(width, height, scene.motion, scene.motion_effects)
+        canvas_width, canvas_height = generation_size(width, height, scene.background_motion_preset, scene.motion_effects)
         normalized = output / f"background_{i:03}.png"
         run(["ffmpeg", "-y", "-v", "error", "-i", str(Path(source).resolve()), "-vf",
              f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=increase,"
@@ -594,15 +612,21 @@ def render_motion_clip(image: Path, foreground: Path | None, scene: Scene, outpu
                        width: int, height: int, fps: int, frame_count: int) -> None:
     """Render one scene from the same linear keyframes used by the draft."""
     end_frame = max(1, frame_count - 1)
-    motion = motion_for(scene.motion, scene.motion_effects)
-    progress = f"on/{end_frame}"
-    zoom = f"({motion.scale_start}+({motion.scale_end - motion.scale_start})*{progress})"
-    x_position = f"({motion.x_start}+({motion.x_end - motion.x_start})*{progress})"
-    y_position = f"({motion.y_start}+({motion.y_end - motion.y_start})*{progress})"
-    crop_x = f"(iw-iw/zoom)/2-({x_position})*iw/zoom"
-    crop_y = f"(ih-ih/zoom)/2+({y_position})*ih/zoom"
-    filter_graph = (f"[0:v]zoompan=z='{zoom}':x='{crop_x}':y='{crop_y}':"
-                    f"d=1:s={width}x{height}:fps={fps},format=yuv420p[background]")
+    motion = motion_for(scene.background_motion_preset, scene.motion_effects)
+    if motion.horizontal_pan_only:
+        x_position = f"({motion.x_start}+({motion.x_end - motion.x_start})*n/{end_frame})"
+        crop_x = f"clip((iw-ow)/2-{x_position}*ow,0,iw-ow)"
+        filter_graph = (f"[0:v]crop=w={width}:h={height}:x='{crop_x}':y=0:exact=1,"
+                        "setsar=1,format=yuv420p[background]")
+    else:
+        progress = f"on/{end_frame}"
+        zoom = f"({motion.scale_start}+({motion.scale_end - motion.scale_start})*{progress})"
+        x_position = f"({motion.x_start}+({motion.x_end - motion.x_start})*{progress})"
+        y_position = f"({motion.y_start}+({motion.y_end - motion.y_start})*{progress})"
+        crop_x = f"(iw-iw/zoom)/2-({x_position})*iw/zoom"
+        crop_y = f"(ih-ih/zoom)/2+({y_position})*ih/zoom"
+        filter_graph = (f"[0:v]zoompan=z='{zoom}':x='{crop_x}':y='{crop_y}':"
+                        f"d=1:s={width}x{height}:fps={fps},format=yuv420p[background]")
     command = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-i", str(image)]
     last_label = "background"
     if foreground is not None:
@@ -625,7 +649,9 @@ def render_motion_clip(image: Path, foreground: Path | None, scene: Scene, outpu
                     f"({fg_motion.scale_end - fg_motion.scale_start})*n/{end_frame})")
         fg_filter = (f"format=rgba,scale=w='iw*{fg_scale}':h='ih*{fg_scale}':eval=frame,format=rgba"
                      if fg_motion.scale_start != 1.0 or fg_motion.scale_end != 1.0 else "format=rgba")
-        fg_fade = fg_motion.fade if fg_motion.fade != "none" else motion.fade
+        fg_fade = fg_motion.fade
+        if fg_fade == "none" and not scene.independent_layer_motion:
+            fg_fade = motion.fade
         if fg_fade != "none":
             duration = frame_count / fps
             fade_duration = min(0.5, duration / 3)
@@ -744,11 +770,15 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
     script.append_tracks(tracks)
     for scene, image, foreground in zip(scenes, prepared, foregrounds):
         segment = draft.VideoSegment(str(image), draft.trange_seconds(scene.start, end=scene.end))
+        motion = motion_for(scene.background_motion_preset, scene.motion_effects)
         if scene.motion != "static" or scene.motion_effects:
-            motion = motion_for(scene.motion, scene.motion_effects)
             end_us = round((scene.end - scene.start) * 1_000_000)
             for offset, scale, x, y in ((0, motion.scale_start, motion.x_start, motion.y_start),
                                         (end_us, motion.scale_end, motion.x_end, motion.y_end)):
+                if motion.horizontal_pan_only:
+                    # Restore canvas height after Jianying fits the wide material to its width.
+                    scale = segment.material_size[0] / width
+                    x *= 2  # Jianying measures position in half canvas widths.
                 segment.add_keyframe(draft.KeyframeProperty.uniform_scale, offset, scale)
                 segment.add_keyframe(draft.KeyframeProperty.position_x, offset, x)
                 segment.add_keyframe(draft.KeyframeProperty.position_y, offset, y)
@@ -756,7 +786,6 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
         script.add_segment(segment, track="visual")
         if foreground is not None:
             person = draft.VideoSegment(str(foreground), draft.trange_seconds(scene.start, end=scene.end))
-            motion = motion_for(scene.motion, scene.motion_effects)
             fg_motion = motion_for("static", scene.foreground_effects)
             end_us = round((scene.end - scene.start) * 1_000_000)
             for offset, fraction in ((0, 0), (end_us, 1)):
@@ -767,7 +796,10 @@ def export_jianying(audio: Path, scenes: list[Scene], srt: Path, output: Path, w
                                     fg_motion.y_start + (fg_motion.y_end - fg_motion.y_start) * fraction)
                 person.add_keyframe(draft.KeyframeProperty.uniform_scale, offset,
                                     fg_motion.scale_start + (fg_motion.scale_end - fg_motion.scale_start) * fraction)
-            fade_keyframes(person, draft, fg_motion.fade if fg_motion.fade != "none" else motion.fade, end_us)
+            fg_fade = fg_motion.fade
+            if fg_fade == "none" and not scene.independent_layer_motion:
+                fg_fade = motion.fade
+            fade_keyframes(person, draft, fg_fade, end_us)
             script.add_segment(person, track="foreground")
     audio_material = draft.AudioMaterial(str(audio_copy))
     audio_end_us = min(round(scenes[-1].end * 1_000_000), audio_material.duration)
@@ -787,6 +819,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cpu", help="faster-whisper 设备：cpu/cuda")
     parser.add_argument("--language", default="zh", help="识别语言，空字符串为自动识别")
     parser.add_argument("--scene-mode", choices=["none", "fixed", "llm"], default="none")
+    parser.add_argument("--parallax-placement", choices=sorted(PARALLAX_PLACEMENTS), default="none")
+    parser.add_argument("--parallax-scenes", default="", help="手动指定分层视差场景序号，从 1 开始")
+    parser.add_argument("--parallax-background-effects", type=json.loads, default=PARALLAX_BACKGROUND_EFFECTS)
+    parser.add_argument("--parallax-foreground-effects", type=json.loads, default=PARALLAX_FOREGROUND_EFFECTS)
     parser.add_argument("--scene-seconds", type=float, default=25.0)
     parser.add_argument("--motion-preset", choices=sorted(PRESETS), default="static",
                         help="镜头动效：静止、大模型逐场景推荐、推拉、平移或分层视差")
@@ -826,6 +862,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("生图 seed 须在 0 到 4294967295 之间")
         if args.generate_images and args.scene_mode == "none":
             raise ValueError("生图需要 --scene-mode fixed 或 llm")
+        if args.parallax_placement != "none" and (args.scene_mode != "llm" or not args.generate_images):
+            raise ValueError("指定分层视差位置需要大模型语义分段并开启 Draw Things 生图")
+        manual_parallax = parse_scene_numbers(args.parallax_scenes) if args.parallax_placement == "manual" else set()
+        parallax_background = normalize_effects(args.parallax_background_effects)
+        parallax_foreground = normalize_effects(args.parallax_foreground_effects)
         if args.generate_images and args.upscale_x2 and not upscaler_available():
             raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
         if args.upscale_x2 and not args.generate_images:
@@ -902,7 +943,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for i, scene in enumerate(scenes):
                 scene.motion = choose_preset(args.motion_preset, i, scene.character_present)
-        for scene in scenes:
+        forced_numbers = parallax_scene_numbers(args.parallax_placement, manual_parallax, len(scenes))
+        if missing := sorted(manual_parallax - forced_numbers):
+            print(f"忽略超出本次分段范围的分层视差序号：{missing}", flush=True)
+        base_motions = {}
+        for number in sorted(forced_numbers):
+            scene = scenes[number - 1]
+            base_motions[number] = scene.motion
+            scene.motion = "parallax"
+            scene.motion_reason = "按指定位置使用分层视差"
+        for number, scene in enumerate(scenes, 1):
+            if number in forced_numbers:
+                scene.independent_layer_motion = True
+                scene.motion_effects = parallax_background.copy()
+                scene.foreground_effects = parallax_foreground.copy()
+                continue
             scene.motion_effects = selected_effects.copy()
             if scene.motion == "parallax":
                 scene.foreground_effects = {key: value for key, value in selected_effects.items() if key != "fade"}
@@ -920,7 +975,8 @@ def main(argv: list[str] | None = None) -> int:
             final_prompt = compose_scene_prompt(scene.prompt, args.image_prompt_suffix, character_name,
                                                 scene.character_present, bool(references))
             image_width, image_height = generation_size(args.width, args.height, scene.motion, scene.motion_effects)
-            if scene.motion == "parallax" and scene.character_present:
+            needs_layers = scene.motion == "parallax"
+            if needs_layers:
                 image_width, image_height = args.width, args.height
             if args.upscale_x2:
                 image_width = (image_width + 63) // 64 * 64
@@ -944,11 +1000,10 @@ def main(argv: list[str] | None = None) -> int:
             elif args.generate_images:
                 try:
                     temporary_image = images_dir / f"scene_{i:03}.pending.png"
-                    needs_layer = scene.motion == "parallax" and scene.character_present
                     generate_image(final_prompt, temporary_image, args.drawthings_model or "", image_width, image_height,
                                    args.image_steps,
                                    progress=lambda percent: write_progress(output, f"生成图片 {i}/{len(scenes)}",
-                                                                           65 + round(((i - 1) + percent / (200 if needs_layer else 100)) / len(scenes) * 20)),
+                                                                           65 + round(((i - 1) + percent / (200 if needs_layers else 100)) / len(scenes) * 20)),
                                    seed=args.image_seed, references=references, upscale_x2=args.upscale_x2)
                     temporary_image.replace(image)
                     record["status"] = "generated"
@@ -958,47 +1013,82 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"警告：第 {i} 段生图失败，将使用黑色背景：{exc}", file=sys.stderr)
                     record["status"] = "failed"
                     record["error"] = str(exc)
-            if scene.motion == "parallax" and scene.character_present and scene.image:
+            if needs_layers and scene.image:
                 background = images_dir / f"scene_{i:03}_background.png"
                 foreground = images_dir / f"scene_{i:03}_foreground.png"
-                background_prompt = (f"{scene.prompt}\nEmpty environment plate of this setting, same era, architecture, "
-                                     "lighting and camera angle. No people, no figures, no silhouettes, no text."
-                                     + (f"\n{args.image_prompt_suffix}" if args.image_prompt_suffix else ""))
-                background_width, background_height = generation_size(args.width, args.height, "parallax")
-                background_fingerprint = image_request_fingerprint(background_prompt, args.drawthings_model or "",
+                try:
+                    edit_model = preferred_edit_model(list_models(include_edit=True), args.drawthings_model or "")
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    print(f"场景 {i} 无法读取编辑模型列表，使用场景模型：{exc}", file=sys.stderr, flush=True)
+                    edit_model = args.drawthings_model or ""
+                background_prompt = parallax_background_prompt()
+                motion_width, motion_height = generation_size(args.width, args.height,
+                                                              scene.background_motion_preset, scene.motion_effects)
+                background_width = max(image_width, motion_width)
+                background_height = max(image_height, motion_height)
+                source_image = Path(scene.image)
+                background_fingerprint = image_request_fingerprint(background_prompt, edit_model,
                                                                     background_width, background_height, args.image_steps,
-                                                                    args.image_seed, [], args.upscale_x2)
+                                                                    args.image_seed, [source_image], args.upscale_x2)
                 background_metadata = images_dir / f"scene_{i:03}_background.request.json"
                 try:
-                    print(f"场景 {i} 空背景提示词：{background_prompt}", flush=True)
+                    print(f"场景 {i} 空背景提示词：{background_prompt}\n参考图：{source_image}；模型：{edit_model}", flush=True)
                     if not background.is_file() or not image_cache_matches(background_metadata, background_fingerprint):
                         pending_background = images_dir / f"scene_{i:03}_background.pending.png"
-                        generate_image(background_prompt, pending_background, args.drawthings_model or "",
+                        generate_image(background_prompt, pending_background, edit_model,
                                        background_width, background_height, args.image_steps, seed=args.image_seed,
-                                       upscale_x2=args.upscale_x2,
+                                       references=[source_image], reference_mode="instruction", upscale_x2=args.upscale_x2,
                                        progress=lambda percent: write_progress(output, f"生成空背景 {i}/{len(scenes)}",
                                                                                65 + round(((i - 1) + 0.5 + percent / 200) / len(scenes) * 20)))
                         pending_background.replace(background)
                         background_metadata.write_text(json.dumps({"fingerprint": background_fingerprint,
                                                                    "prompt": background_prompt,
-                                                                   "model": args.drawthings_model, "width": background_width,
+                                                                   "model": edit_model, "width": background_width,
                                                                    "height": background_height, "steps": args.image_steps,
-                                                                   "seed": args.image_seed, "references": [],
+                                                                   "seed": args.image_seed, "references": [str(source_image)],
+                                                                   "reference_mode": "instruction", "method": "source_edit",
                                                                    "upscale_x2": args.upscale_x2}, ensure_ascii=False,
                                                                   indent=2), encoding="utf-8")
-                    if not foreground.is_file() or foreground.stat().st_mtime < Path(scene.image).stat().st_mtime:
-                        cutout = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
-                        run([str(cutout), str(scene.image), str(foreground)])
+                    foreground_text = parallax_foreground_prompt()
+                    foreground_fingerprint = image_request_fingerprint(foreground_text, edit_model,
+                                                                        image_width, image_height, args.image_steps,
+                                                                        args.image_seed, [source_image], args.upscale_x2)
+                    foreground_metadata = images_dir / f"scene_{i:03}_foreground.request.json"
+                    if not foreground.is_file() or not image_cache_matches(foreground_metadata, foreground_fingerprint):
+                        pending_foreground = images_dir / f"scene_{i:03}_foreground.pending.png"
+                        print(f"场景 {i} AI 前景提示词：{foreground_text}\n参考图：{source_image}；模型：{edit_model}", flush=True)
+                        generate_image(foreground_text, pending_foreground, edit_model, image_width, image_height,
+                                       args.image_steps, seed=args.image_seed, references=[source_image],
+                                       reference_mode="instruction", upscale_x2=args.upscale_x2)
+                        validate_foreground(pending_foreground)
+                        masked_foreground = images_dir / f"scene_{i:03}_foreground.masked.png"
+                        apply_foreground_mask(source_image, pending_foreground, masked_foreground)
+                        masked_foreground.replace(pending_foreground)
+                        pending_foreground.replace(foreground)
+                        foreground_metadata.write_text(json.dumps({"fingerprint": foreground_fingerprint,
+                                                                    "prompt": foreground_text, "model": edit_model,
+                                                                    "width": image_width, "height": image_height,
+                                                                    "steps": args.image_steps, "seed": args.image_seed,
+                                                                    "references": [str(source_image)], "method": "ai",
+                                                                    "reference_mode": "instruction", "upscale_x2": args.upscale_x2,
+                                                                    "mask_from_source": True}, ensure_ascii=False,
+                                                                   indent=2), encoding="utf-8")
                     validate_foreground(foreground)
                     scene.background, scene.foreground = str(background), str(foreground)
+                    scene.foreground_method = "ai"
+                    record["foreground_method"] = "ai"
                     record["layer_status"] = "ready"
                     print(f"场景 {i} 已生成分层素材：{background.name}、{foreground.name}", flush=True)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                     record["layer_status"] = "failed"
                     record["layer_error"] = str(exc)
                     print(f"警告：第 {i} 段分层素材失败，改用单图动效：{exc}", file=sys.stderr)
-            if scene.motion == "parallax" and not scene.foreground:
-                scene.motion = choose_preset("parallax", i - 1, False)
+            if needs_layers and not scene.foreground:
+                scene.motion = choose_preset(base_motions.get(i, "parallax"), i - 1, False)
+                scene.motion_effects = selected_effects.copy()
+                scene.foreground_effects = {}
+                scene.independent_layer_motion = False
+                scene.motion_reason = "分层素材不可用，改用单图运镜"
             if not scene.image and (scene.motion != "static" or scene.motion_effects):
                 scene.motion = "static"
                 scene.motion_effects = {}

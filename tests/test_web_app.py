@@ -170,6 +170,23 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(json.loads(command[command.index("--motion-effects") + 1]),
                          {"fade": "in", "vertical": "up"})
 
+    def test_manual_parallax_placement_keeps_base_motion_and_passes_scene_numbers(self):
+        manager = self.app.extensions["job_manager"]
+        data = {"audio_id": "root:中文旁白.m4a", "output": "assets", "scene_mode": "llm",
+                "llm_model": "test", "motion_preset": "pan_left", "parallax_placement": "manual",
+                "parallax_scenes": "5，1, 5", "generate_images": True, "drawthings_model": "test.ckpt",
+                "parallax_background_effects": {"vertical": "down", "horizontal": "none"},
+                "parallax_foreground_effects": {"fade": "none"}}
+        with patch("web_app.list_models", return_value=[{"id": "test.ckpt"}]):
+            command, _, _ = manager._command(data, self.root / "runs" / "parallax")
+        self.assertEqual(command[command.index("--motion-preset") + 1], "pan_left")
+        self.assertEqual(command[command.index("--parallax-placement") + 1], "manual")
+        self.assertEqual(command[command.index("--parallax-scenes") + 1], "1,5")
+        self.assertEqual(json.loads(command[command.index("--parallax-background-effects") + 1]), {"vertical": "down"})
+        self.assertEqual(json.loads(command[command.index("--parallax-foreground-effects") + 1]), {})
+        with self.assertRaisesRegex(ValueError, "大模型语义分段"):
+            manager._command(dict(data, scene_mode="fixed"), self.root / "runs" / "parallax")
+
     def test_profile_model_can_be_changed_and_profile_can_be_deleted(self):
         models = [{"id": "flux.ckpt", "name": "FLUX"}, {"id": "z_image.ckpt", "name": "Z Image"}]
         with patch("web_app.list_models", return_value=models):

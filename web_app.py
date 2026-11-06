@@ -21,7 +21,8 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from jianying_register import register_draft, registration_status
 from drawthings_cli import list_models, upscaler_available
-from scene_motion import normalize_effects
+from scene_motion import (PARALLAX_BACKGROUND_EFFECTS, PARALLAX_FOREGROUND_EFFECTS, PARALLAX_PLACEMENTS,
+                          normalize_effects, parse_scene_numbers)
 from scene_editor import SceneEditor
 from character_profiles import CharacterStore, DEFAULT_FRONT_PROMPT, VIEWS
 
@@ -136,6 +137,12 @@ class JobManager:
             raise ValueError("动效预设无效")
         if motion_preset == "parallax" and (not generate_images or not profile_id):
             raise ValueError("分层视差需要开启 Draw Things 生图并选择角色档案")
+        parallax_placement = str(data.get("parallax_placement") or "none")
+        if parallax_placement not in PARALLAX_PLACEMENTS:
+            raise ValueError("分层视差位置无效")
+        if parallax_placement != "none" and (scene_mode != "llm" or not generate_images):
+            raise ValueError("指定分层视差位置需要大模型语义分段并开启 Draw Things 生图")
+        parallax_numbers = parse_scene_numbers(data.get("parallax_scenes", "")) if parallax_placement == "manual" else set()
         motion_effects = normalize_effects(data.get("motion_effects"))
         if scene_mode == "none":
             motion_effects = {}
@@ -164,6 +171,14 @@ class JobManager:
                    "--output", output_type, "--scene-mode", scene_mode, "--whisper-model", str(data.get("whisper_model") or "small"),
                    "--language", str(data.get("language", "zh")), "--width", str(width), "--height", str(height), "--fps", str(fps),
                    "--scene-seconds", str(scene_seconds), "--motion-preset", motion_preset]
+        if parallax_placement != "none":
+            background = normalize_effects(data.get("parallax_background_effects", PARALLAX_BACKGROUND_EFFECTS))
+            foreground = normalize_effects(data.get("parallax_foreground_effects", PARALLAX_FOREGROUND_EFFECTS))
+            command += ["--parallax-placement", parallax_placement,
+                        "--parallax-background-effects", json.dumps(background),
+                        "--parallax-foreground-effects", json.dumps(foreground)]
+        if parallax_numbers:
+            command += ["--parallax-scenes", ",".join(map(str, sorted(parallax_numbers)))]
         if motion_effects:
             command += ["--motion-effects", json.dumps(motion_effects, ensure_ascii=False)]
         if image_steps is not None:
@@ -399,7 +414,9 @@ def create_app(project_root: Path | None = None) -> Flask:
 
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", parallax_effect_defaults={
+            "background": PARALLAX_BACKGROUND_EFFECTS, "foreground": PARALLAX_FOREGROUND_EFFECTS,
+        })
 
     @app.get("/characters")
     def character_page():
@@ -446,7 +463,8 @@ def create_app(project_root: Path | None = None) -> Flask:
         data = request.get_json(silent=True) or {}
         try:
             return jsonify(editor.generate(job_id, int(data.get("scene")), str(data.get("layer")),
-                                        str(data.get("command")), data.get("references") if "references" in data else None)), 202
+                                        str(data.get("command")), data.get("references") if "references" in data else None,
+                                        str(data.get("mode") or "standard"))), 202
         except KeyError:
             return jsonify(error="任务不存在"), 404
         except (ValueError, TypeError, OSError) as exc:
@@ -463,6 +481,16 @@ def create_app(project_root: Path | None = None) -> Flask:
         except KeyError:
             return jsonify(error="任务不存在"), 404
         except (ValueError, TypeError, OSError, subprocess.SubprocessError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/jobs/<job_id>/editor/candidates/cutout")
+    def scene_editor_cutout(job_id: str):
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(editor.cutout_from_scene(job_id, int(data.get("scene")))), 202
+        except KeyError:
+            return jsonify(error="任务不存在"), 404
+        except (ValueError, TypeError, OSError) as exc:
             return jsonify(error=str(exc)), 400
 
     @app.get("/api/jobs/<job_id>/editor/candidates/<task_id>")
@@ -525,7 +553,7 @@ def create_app(project_root: Path | None = None) -> Flask:
     @app.post("/api/jobs/<job_id>/editor/sync-jianying")
     def scene_editor_sync(job_id: str):
         try:
-            return jsonify(editor.sync_jianying(job_id))
+            return jsonify(editor.sync_jianying(job_id)), 202
         except KeyError:
             return jsonify(error="任务不存在"), 404
         except (ValueError, OSError) as exc:

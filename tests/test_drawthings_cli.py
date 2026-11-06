@@ -52,6 +52,15 @@ class DrawThingsCliTests(unittest.TestCase):
             models = list_models(cli)
         self.assertEqual(models, [{"id": "z_image_turbo_1.0_i8x.ckpt", "name": "Z Image Turbo"}])
 
+    def test_editor_can_list_downloaded_edit_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = Path(tmp) / "draw-things-cli"
+            cli.write_text("#!/bin/sh\ncat <<'EOF'\nMODEL  NAME  SOURCE  DOWNLOADED  HUGGING_FACE\nqwen_image_edit_2511_i8x.ckpt  Qwen Image Edit  official  yes  -\nfooocus_inpaint_sd_xl.ckpt  Inpaint  official  yes  -\nEOF\n")
+            cli.chmod(0o755)
+            models = list_models(cli, include_edit=True)
+        self.assertEqual(models, [{"id": "qwen_image_edit_2511_i8x.ckpt", "name": "Qwen Image Edit"},
+                                  {"id": "fooocus_inpaint_sd_xl.ckpt", "name": "Inpaint"}])
+
     def test_generate_uses_offline_cli_and_model_recommendations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -106,3 +115,37 @@ class DrawThingsCliTests(unittest.TestCase):
                                cli=cli, references=[reference])
             args = (root / "args.txt").read_text().splitlines()
             self.assertNotEqual(args[args.index("--image") + 1], str(reference))
+
+    def test_edit_reference_preserves_original_canvas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "scene.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.04",
+                            "-frames:v", "1", str(reference)], check=True)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DRAWTHINGS_TEST_ARGS\"\nwhile [ \"$1\" != '--output' ]; do shift; done\nprintf image > \"$2\"\n")
+            cli.chmod(0o755)
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_ARGS": str(root / "args.txt")}):
+                generate_image("remove person", root / "out.png", "qwen.ckpt", 512, 512,
+                               cli=cli, references=[reference], reference_mode="edit")
+            args = (root / "args.txt").read_text().splitlines()
+            self.assertEqual(args[args.index("--image") + 1], str(reference))
+
+    def test_instruction_reference_uses_edge_padding_without_white_bars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "scene.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.04",
+                            "-frames:v", "1", str(reference)], check=True)
+            cli = root / "draw-things-cli"
+            cli.write_text("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n--image) image=\"$2\"; shift 2;;\n--output) output=\"$2\"; shift 2;;\n*) shift;;\nesac\ndone\ncp \"$image\" \"$DRAWTHINGS_TEST_REF_COPY\"\nprintf image > \"$output\"\n")
+            cli.chmod(0o755)
+            copy = root / "reference-copy.png"
+            with patch.dict("os.environ", {"DRAWTHINGS_TEST_REF_COPY": str(copy)}):
+                generate_image("remove person", root / "out.png", "qwen.ckpt", 64, 64,
+                               cli=cli, references=[reference], reference_mode="instruction")
+            from PIL import Image
+            with Image.open(copy) as image:
+                self.assertEqual(image.size, (64, 128))
+                self.assertGreater(image.getpixel((32, 0))[0], 180)
+                self.assertLess(image.getpixel((32, 0))[1], 80)

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 
+
 DEFAULT_CLI = Path(__file__).resolve().parent / "tools" / "drawthings" / "draw-things-cli"
 LOCK_PATH = Path(tempfile.gettempdir()) / "wav-video-drawthings.lock"
 X2_UPSCALER = "realesrgan_x2plus_f16.ckpt"
@@ -44,7 +45,7 @@ def cli_path() -> Path:
     raise RuntimeError("未找到 draw-things-cli，请将它安装到 PATH 或 tools/drawthings/")
 
 
-def list_models(cli: Path | None = None) -> list[dict[str, str]]:
+def list_models(cli: Path | None = None, include_edit: bool = False) -> list[dict[str, str]]:
     selected = cli or cli_path()
     result = subprocess.run([str(selected), "models", "list", "--downloaded-only", "--offline"],
                             capture_output=True, text=True, check=True, timeout=30)
@@ -52,7 +53,8 @@ def list_models(cli: Path | None = None) -> list[dict[str, str]]:
     for line in result.stdout.splitlines():
         fields = re.split(r"\s{2,}", line.strip())
         model_id = fields[0] if fields else ""
-        specialized = model_id.startswith(("ltx_", "wan_")) or "_edit_" in model_id or "inpaint" in model_id
+        specialized = model_id.startswith(("ltx_", "wan_")) or (not include_edit and
+                        ("_edit_" in model_id or "inpaint" in model_id))
         if len(fields) >= 4 and model_id.endswith(".ckpt") and fields[3].lower() == "yes" and not specialized:
             models.append({"id": fields[0], "name": fields[1]})
     return models
@@ -62,9 +64,11 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                    steps: int | None = None, cli: Path | None = None,
                    progress: Callable[[int], None] | None = None,
                    seed: int | None = None, references: list[Path] | None = None,
-                   upscale_x2: bool = False) -> None:
+                   upscale_x2: bool = False, reference_mode: str = "moodboard") -> None:
     if not model:
         raise ValueError("请选择已下载的 Draw Things 模型")
+    if reference_mode not in {"moodboard", "edit", "instruction"}:
+        raise ValueError("参考图模式无效")
     path.parent.mkdir(parents=True, exist_ok=True)
     command = [str(cli or cli_path()), "generate", "--local", "--offline", "--no-download-missing",
                "--disable-preview", "--model", model, "--prompt", prompt,
@@ -78,7 +82,7 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
         command += ["--config-json", json.dumps(X2_CONFIG, separators=(",", ":"))]
     prepared_reference = None
     selected_references = list(references or [])
-    if selected_references:
+    if selected_references and reference_mode in {"moodboard", "instruction"}:
         probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
                                 str(selected_references[0])], capture_output=True, text=True, timeout=10)
@@ -93,9 +97,15 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                 with tempfile.NamedTemporaryFile(prefix="character_reference_", suffix=".png",
                                                   dir=path.parent, delete=False) as temporary:
                     prepared_reference = Path(temporary.name)
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(selected_references[0]),
-                                "-vf", "pad=iw:ih+64:0:32:color=white", "-frames:v", "1",
-                                str(prepared_reference)], capture_output=True, text=True, check=True, timeout=60)
+                if reference_mode == "instruction":
+                    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(selected_references[0]),
+                                    "-vf", "pad=iw:ih+64:0:32:color=black,fillborders=top=32:bottom=32:mode=smear",
+                                    "-frames:v", "1", str(prepared_reference)],
+                                   capture_output=True, text=True, check=True, timeout=60)
+                else:
+                    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(selected_references[0]),
+                                    "-vf", "pad=iw:ih+64:0:32:color=white", "-frames:v", "1",
+                                    str(prepared_reference)], capture_output=True, text=True, check=True, timeout=60)
                 selected_references[0] = prepared_reference
     for reference in selected_references:
         if not reference.is_file():

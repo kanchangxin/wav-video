@@ -8,11 +8,59 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts, compose_scene_prompt, image_request_fingerprint, review_scenes, validate_foreground, recommend_scene_motions, recommend_character_presence
+from audio_video import Caption, Scene, analyze_scenes, audio_duration, build_scenes, decode_audio_ffmpeg, export_jianying, main, parse_llm_scenes, resolve_whisper_model, write_srt, render_mp4, simplify_texts, compose_scene_prompt, image_request_fingerprint, review_scenes, validate_foreground, recommend_scene_motions, recommend_character_presence, prepare_foregrounds, prepare_motion_backgrounds
 from scene_motion import choose_preset, motion_for, generation_size, normalize_effects
+from parallax_layers import background_prompt, foreground_prompt, foreground_mode, preferred_edit_model, apply_foreground_mask
 
 
 class TimelineTests(unittest.TestCase):
+    def test_forced_parallax_uses_one_based_scene_numbers(self):
+        from scene_motion import parallax_scene_numbers, parse_scene_numbers
+        manual = parse_scene_numbers("5，2, 5  12")
+        for mode, expected in {"all": set(range(1, 10)), "odd": {1, 3, 5, 7, 9}, "spaced_odd": {1, 5, 9},
+                               "even": {2, 4, 6, 8}, "none": set(), "manual": {2, 5}}.items():
+            self.assertEqual(parallax_scene_numbers(mode, manual, 9), expected)
+        for invalid in ("", "0", "-1", "1.5", "1,a"):
+            with self.assertRaises(ValueError):
+                parse_scene_numbers(invalid)
+
+    def test_ai_foreground_mask_preserves_original_subject_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.png"
+            ai = root / "ai.png"
+            result = root / "result.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            "color=c=red:s=64x64:d=0.04", "-frames:v", "1", str(source)], check=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            "color=c=blue:s=64x64:d=0.04", "-vf",
+                            "format=rgba,geq=r='0':g='0':b='255':a='if(lt(X,32),255,0)'",
+                            "-frames:v", "1", str(ai)], check=True)
+            apply_foreground_mask(source, ai, result)
+            rgb = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(result),
+                                           "-vf", "crop=1:1:8:8,format=rgb24", "-frames:v", "1",
+                                           "-f", "rawvideo", "-"])
+            alpha = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(result),
+                                             "-vf", "alphaextract,crop=1:1:56:8", "-frames:v", "1",
+                                             "-f", "rawvideo", "-"])
+            self.assertGreater(rgb[0], 240)
+            self.assertEqual(rgb[1:], bytes([0, 0]))
+            self.assertEqual(alpha, bytes([0]))
+
+    def test_parallax_prompts_target_same_composite_subject(self):
+        prompt = "高欢骑马冲入战场，手持长矛，远处有士兵"
+        self.assertEqual(foreground_mode(prompt), "ai")
+        self.assertEqual(background_prompt(), "把 image 1 前景删除，只保留背景，并补全背景")
+        self.assertEqual(foreground_prompt(), "把image1 背景透明")
+        self.assertEqual(foreground_mode("高欢站在城门前"), "cutout")
+
+    def test_parallax_edit_model_prefers_downloaded_qwen(self):
+        models = [{"id": "z_image.ckpt"}, {"id": "qwen_image_2.1_turbo_i8x.ckpt"}]
+        self.assertEqual(preferred_edit_model(models, "z_image.ckpt"), "qwen_image_2.1_turbo_i8x.ckpt")
+        self.assertEqual(preferred_edit_model([{"id": "qwen_image_edit_2511_i8x.ckpt"}], "z_image.ckpt"),
+                         "qwen_image_edit_2511_i8x.ckpt")
+        self.assertEqual(preferred_edit_model(models[:1], "z_image.ckpt"), "z_image.ckpt")
+
     def test_identity_prompt_only_applies_when_protagonist_is_present(self):
         with_character = compose_scene_prompt("ancient battlefield", "cinematic light", "高欢", True, True)
         without_character = compose_scene_prompt("empty battlefield", "cinematic light", "高欢", False, True)
@@ -329,6 +377,46 @@ class TimelineTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
+    def test_incomplete_parallax_uses_original_image_in_both_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "original.png"
+            empty = root / "empty.png"
+            foreground = root / "foreground.png"
+            for path, color in ((original, "red"), (empty, "green"), (foreground, "blue@0.5")):
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                                f"color=c={color}:s=320x192:d=0.04,format=rgba", "-frames:v", "1", str(path)], check=True)
+            scene = Scene(0, 1, "主角骑马，手持长矛", image=str(original), background=str(empty),
+                          foreground=str(foreground), motion="parallax", character_present=True)
+            prepared = prepare_motion_backgrounds([scene], root / "prepared", 320, 192)[0]
+            rgb = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(prepared),
+                                           "-vf", "crop=1:1:8:8,format=rgb24", "-frames:v", "1",
+                                           "-f", "rawvideo", "-"])
+            self.assertGreater(rgb[0], 240)
+            self.assertEqual(rgb[1:], bytes([0, 0]))
+
+    def test_parallax_without_background_does_not_overlay_duplicate_foreground(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            foreground = root / "foreground.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            "color=c=red@0.5:s=320x192:d=0.04,format=rgba", "-frames:v", "1", str(foreground)], check=True)
+            scene = Scene(0, 1, "scene", image=str(foreground), character_present=True,
+                          motion="parallax", foreground=str(foreground))
+            self.assertEqual(prepare_foregrounds([scene], root / "prepared", 320, 192), [None])
+
+    def test_composite_parallax_requires_complete_foreground_method(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            foreground = root / "foreground.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            "color=c=red@0.5:s=320x192:d=0.04,format=rgba", "-frames:v", "1", str(foreground)], check=True)
+            scene = Scene(0, 1, "主角骑马，手持长矛", image=str(foreground), character_present=True,
+                          motion="parallax", background=str(foreground), foreground=str(foreground))
+            self.assertEqual(prepare_foregrounds([scene], root / "prepared", 320, 192), [None])
+            scene.foreground_method = "ai"
+            self.assertTrue(prepare_foregrounds([scene], root / "prepared", 320, 192)[0])
+
     def test_fixed_scene_character_presence_uses_llm_when_configured(self):
         scenes = [Scene(0, 10, "a general enters"), Scene(10, 20, "empty street")]
         answer = {"choices": [{"message": {"content": '{"presence":[{"index":0,"present":true},{"index":1,"present":false}]}'}}]}
@@ -378,6 +466,14 @@ class RenderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "抠图透明度异常"):
                 validate_foreground(mask)
 
+    def test_opaque_foreground_has_clear_alpha_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "opaque.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            "color=c=red:s=320x192:d=0.04", "-frames:v", "1", str(image)], check=True)
+            with self.assertRaisesRegex(RuntimeError, "透明通道"):
+                validate_foreground(image)
+
     def test_motion_plan_falls_back_to_single_image_without_foreground(self):
         self.assertEqual(choose_preset("parallax", 0, False), "pan_left")
         self.assertEqual(choose_preset("parallax", 1, True), "parallax")
@@ -409,10 +505,11 @@ class RenderTests(unittest.TestCase):
 
     def test_pan_and_pull_out_reserve_generation_space(self):
         self.assertEqual(generation_size(320, 180, "push_in"), (320, 180))
-        for preset in ("pull_out", "pan_left", "pan_right", "parallax"):
-            image_width, image_height = generation_size(320, 180, preset)
-            self.assertGreaterEqual(image_width, 400)
-            self.assertGreaterEqual(image_height, 225)
+        for preset in ("pan_left", "pan_right", "parallax"):
+            self.assertEqual(generation_size(768, 512, preset), (960, 512))
+        self.assertEqual(generation_size(768, 512, "pan_right", {"vertical": "up"}), (960, 640))
+        self.assertEqual(generation_size(768, 512, "pan_right", {"zoom": "out"}), (960, 640))
+        self.assertEqual(generation_size(768, 512, "pull_out"), (960, 640))
 
     def test_draft_pan_uses_visible_keyframes_and_large_prepared_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -431,10 +528,30 @@ class RenderTests(unittest.TestCase):
             dimensions = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0",
                                                   "-show_entries", "stream=width,height", "-of", "csv=p=0",
                                                   str(prepared)], text=True).strip()
-            self.assertEqual(dimensions, "448,256")
+            self.assertEqual(dimensions, "448,180")
             segment = next(track for track in content["tracks"] if track["name"] == "visual")["segments"][0]
             props = {item["property_type"]: item["keyframe_list"] for item in segment["common_keyframes"]}
-            self.assertGreater(props["KFTypePositionX"][0]["values"][0] - props["KFTypePositionX"][1]["values"][0], 0.15)
+            self.assertEqual([frame["values"][0] for frame in props["KFTypePositionX"]], [0.24, -0.24])
+            self.assertEqual([frame["values"][0] for frame in props["KFTypeScaleX"]], [1.4, 1.4])
+
+    def test_horizontal_pan_crops_wide_source_without_vertical_zoom(self):
+        from audio_video import render_motion_clip
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, clip = root / "wide.png", root / "pan.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=green:s=448x192",
+                            "-vf", "drawbox=x=0:y=12:w=448:h=16:color=blue:t=fill,"
+                                   "drawbox=x=216:y=50:w=16:h=90:color=red:t=fill",
+                            "-frames:v", "1", str(source)], check=True)
+            render_motion_clip(source, None, Scene(0, 1, "scene", motion="pan_right"), clip, 320, 192, 10, 10)
+            raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(clip), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+            def pixel(frame, x, y):
+                offset = ((frame * 192 + y) * 320 + x) * 3
+                return raw[offset:offset + 3]
+            self.assertGreater(pixel(0, 122, 96)[0], 220)
+            self.assertGreater(pixel(9, 198, 96)[0], 220)
+            self.assertGreater(pixel(0, 160, 18)[2], 220)
+            self.assertGreater(pixel(9, 160, 18)[2], 220)
 
     def test_failed_image_generation_disables_invisible_black_motion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -516,19 +633,15 @@ class RenderTests(unittest.TestCase):
                             "-c:a", "aac", str(audio)], check=True)
             transcript = root / "captions.json"
             transcript.write_text(json.dumps([{"start": 0, "end": 1, "text": "人物出场"}]))
-            profile = root / "character"
-            profile.mkdir()
-            (profile / "front.png").write_bytes(b"reference")
-            (profile / "profile.json").write_text(json.dumps({"name": "主角", "views": {
-                "front": {"status": "approved"}, "three_quarter": {"status": "empty"},
-                "full_body": {"status": "empty"}}}))
             background, foreground = root / "background.png", root / "foreground.png"
             subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x192:d=0.1",
                             "-frames:v", "1", str(background)], check=True)
             subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red@0.5:s=320x192:d=0.04,format=rgba",
                             "-frames:v", "1", str(foreground)], check=True)
+            generated = []
             def fake_generate(prompt, path, model, width, height, steps, **kwargs):
-                shutil.copy2(background, path)
+                generated.append((path.name, model, kwargs, prompt))
+                shutil.copy2(foreground if path.name.endswith("_foreground.pending.png") else background, path)
             from audio_video import run as original_run
             def fake_run(command, **kwargs):
                 if Path(command[0]).name == "person_cutout":
@@ -536,17 +649,83 @@ class RenderTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0)
                 return original_run(command, **kwargs)
             output = root / "out"
-            with patch("audio_video.analyze_scenes", return_value=[Scene(0, 1, "hero in city", character_present=True)]), \
+            def recommend(scenes, *args, **kwargs):
+                for scene in scenes:
+                    scene.motion = "push_in"
+            with patch("audio_video.analyze_scenes", return_value=[Scene(0, .5, "traveler in city"), Scene(.5, 1, "street")]), \
+                 patch("audio_video.recommend_scene_motions", side_effect=recommend), \
                  patch("audio_video.generate_image", side_effect=fake_generate), \
+                 patch("audio_video.list_models", return_value=[{"id": "qwen_image_2.1_turbo_i8x.ckpt"}]), \
                  patch("audio_video.run", side_effect=fake_run):
                 code = main([str(audio), "--output-dir", str(output), "--output", "both", "--transcript-json", str(transcript),
                              "--scene-mode", "llm", "--llm-model", "test", "--generate-images", "--drawthings-model", "test.ckpt",
-                             "--character-profile", str(profile), "--motion-preset", "parallax", "--width", "320", "--height", "180", "--fps", "10"])
+                             "--motion-preset", "auto", "--parallax-placement", "odd", "--width", "320", "--height", "180", "--fps", "10",
+                             "--image-prompt-suffix", "cinematic light"])
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads((output / "scenes.json").read_text())[0]["motion"], "parallax")
+            self.assertEqual([scene["motion"] for scene in json.loads((output / "scenes.json").read_text())],
+                             ["parallax", "push_in"])
             self.assertTrue((output / "video.mp4").is_file())
             content = json.loads((output / "jianying_draft/draft_content.json").read_text())
-            self.assertIn("foreground", {track["name"] for track in content["tracks"]})
+            tracks = {track["name"]: track for track in content["tracks"]}
+            def first_keyframes(track):
+                return {entry["property_type"]: [frame["values"][0] for frame in entry["keyframe_list"]]
+                        for entry in tracks[track]["segments"][0]["common_keyframes"]}
+            background_frames = first_keyframes("visual")
+            foreground_frames = first_keyframes("foreground")
+            self.assertEqual(background_frames["KFTypePositionX"], [-0.24, 0.24])
+            self.assertNotIn("KFTypeAlpha", background_frames)
+            self.assertEqual(foreground_frames["KFTypePositionX"], [0.0, 0.0])
+            self.assertEqual(foreground_frames["KFTypeAlpha"], [0.0, 1.0, 1.0, 0.0])
+            edit_call = next((model, kwargs, prompt) for name, model, kwargs, prompt in generated
+                             if name.endswith("_background.pending.png"))
+            self.assertEqual(edit_call[0], "qwen_image_2.1_turbo_i8x.ckpt")
+            self.assertEqual(edit_call[1]["references"], [(output / "images/scene_001.png").resolve()])
+            self.assertEqual(edit_call[1]["reference_mode"], "instruction")
+            self.assertEqual(edit_call[2], "把 image 1 前景删除，只保留背景，并补全背景")
+            background_request = json.loads((output / "images/scene_001_background.request.json").read_text())
+            self.assertEqual((background_request["width"], background_request["height"]), (448, 180))
+            foreground_call = next((kwargs, prompt) for name, _, kwargs, prompt in generated
+                                   if name.endswith("_foreground.pending.png"))
+            self.assertEqual(foreground_call[0]["references"], [(output / "images/scene_001.png").resolve()])
+            self.assertEqual(foreground_call[0]["reference_mode"], "instruction")
+            self.assertEqual(foreground_call[1], "把image1 背景透明")
+
+    def test_composite_subject_opaque_ai_foreground_falls_back_to_single_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1",
+                            "-c:a", "aac", str(audio)], check=True)
+            transcript = root / "captions.json"
+            transcript.write_text(json.dumps([{"start": 0, "end": 1, "text": "主角骑马"}]))
+            profile = root / "character"
+            profile.mkdir()
+            (profile / "front.png").write_bytes(b"reference")
+            (profile / "profile.json").write_text(json.dumps({"name": "主角", "views": {
+                "front": {"status": "approved"}, "three_quarter": {"status": "empty"},
+                "full_body": {"status": "empty"}}}))
+            opaque = root / "opaque.png"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=320x192:d=0.04",
+                            "-frames:v", "1", str(opaque)], check=True)
+            calls = []
+            def fake_generate(prompt, path, model, width, height, steps, **kwargs):
+                calls.append(kwargs)
+                shutil.copy2(opaque, path)
+            output = root / "out"
+            with patch("audio_video.analyze_scenes", return_value=[Scene(0, 1, "主角骑马，手持长矛", character_present=True)]), \
+                 patch("audio_video.generate_image", side_effect=fake_generate), \
+                 patch("audio_video.list_models", return_value=[{"id": "qwen_image_2.1_turbo_i8x.ckpt"}]), \
+                 patch("audio_video.upscaler_available", return_value=True):
+                code = main([str(audio), "--output-dir", str(output), "--output", "assets", "--transcript-json", str(transcript),
+                             "--scene-mode", "llm", "--llm-model", "test", "--generate-images", "--drawthings-model", "test.ckpt",
+                             "--character-profile", str(profile), "--motion-preset", "parallax", "--width", "320", "--height", "192",
+                             "--upscale-x2"])
+            self.assertEqual(code, 0)
+            scene = json.loads((output / "scenes.json").read_text())[0]
+            self.assertNotEqual(scene["motion"], "parallax")
+            self.assertIsNone(scene["foreground"])
+            self.assertEqual(calls[-1]["reference_mode"], "instruction")
+            self.assertTrue(calls[-1]["upscale_x2"])
 
     def test_jianying_clamps_audio_to_its_reported_material_duration(self):
         with tempfile.TemporaryDirectory() as tmp:

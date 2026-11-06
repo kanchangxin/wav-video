@@ -26,6 +26,9 @@
     .detail h4{font-size:12px;color:#bdcae8;margin:20px 0 9px}.log{background:#101524;border:1px solid #2e3851;border-radius:10px;padding:13px;white-space:pre-wrap;overflow:auto;max-height:210px;min-height:78px;font:11px/1.55 ui-monospace,SFMono-Regular,monospace;color:#a6b6d4}.files{display:flex;flex-wrap:wrap;gap:8px}.file-link{display:inline-flex;border:1px solid #48577b;background:#273453;border-radius:8px;padding:8px 10px;text-decoration:none;font-size:11px}.file-link:hover{background:#34466e}.preview{white-space:pre-wrap;background:#111827;border:1px solid #303a54;border-radius:10px;padding:13px;max-height:180px;overflow:auto;color:#d7e0f4;font-size:12px;line-height:1.65}.video{width:100%;max-height:300px;border-radius:10px;background:#000}.cancel{border:1px solid #89525f;background:#3b2730;color:#ffcad3;padding:7px 10px;border-radius:8px;font-size:11px}
     .review-card{border:1px solid #445376;background:#151d30;border-radius:10px;padding:12px;margin:10px 0}.review-card strong{font-size:12px}.review-card textarea{min-height:76px}.review-card .toggle{margin:8px 0}.review-box{border:1px solid #5b6e9d;border-radius:12px;padding:14px;margin:15px 0;background:#1d2944}.review-box h4{margin:0 0 6px}.review-list{max-height:420px;overflow:auto}.review-box .primary{margin-top:10px}
     @media(max-width:1020px){.grid{grid-template-columns:1fr}.status-layout{grid-template-columns:170px 1fr}}@media(max-width:650px){.shell{padding:20px 14px}.top{display:block}.local{display:inline-block;margin-top:16px}.panel-head,.body,.actions,.detail{padding-left:16px;padding-right:16px}.options{grid-template-columns:repeat(2,1fr)}.status-layout{display:block}.history{border-right:0;border-bottom:1px solid #303850;max-height:155px;display:flex;gap:6px;overflow:auto}.history-title{display:none}.job-btn{min-width:140px;margin:0}.row.three{grid-template-columns:repeat(3,1fr)}}
+    #parallax-layer-effects summary { cursor: pointer; }
+    #parallax-layer-effects fieldset { border: 0; margin: 14px 0 0; padding: 0; min-width: 0; }
+    #parallax-layer-effects legend { font-weight: 600; }
   </style>
 </head>
 <body>
@@ -43,7 +46,7 @@
             <label for="audio-id">选择音频</label>
             <div class="inline"><select id="audio-id" required></select><button class="ghost" type="button" id="refresh-audio">刷新</button></div>
             <div class="upload"><span id="upload-label">或者上传本地音频</span><input id="upload-file" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.mp4"></div><div id="upload-progress" class="upload-progress hidden"><span id="upload-percent">上传中 0%</span><progress id="upload-bar" max="100" value="0"></progress></div>
-            <div class="row"><div><label for="whisper-model">Whisper 模型</label><select id="whisper-model"><option value="tiny">tiny · 快速测试</option><option value="small">small · 标准</option><option value="medium">medium · 更准确</option><option value="large-v3">large-v3 · 高质量</option></select></div><div><label for="language">语言</label><select id="language"><option value="zh">中文</option><option value="">自动识别</option><option value="en">英语</option></select></div></div>
+            <div class="row"><div><label for="whisper-model">Whisper 模型</label><select id="whisper-model"><option value="tiny">tiny · 快速测试</option><option value="small">small · 标准</option><option value="medium" selected>medium · 更准确</option><option value="large-v3">large-v3 · 高质量</option></select></div><div><label for="language">语言</label><select id="language"><option value="zh">中文</option><option value="">自动识别</option><option value="en">英语</option></select></div></div>
             <label class="toggle"><input id="quick-test" type="checkbox" checked>只处理前 <input id="max-seconds" type="number" min="1" max="3600" value="20" style="width:72px;min-height:32px;padding:5px 8px"> 秒，先快速试运行</label>
             <label for="transcript-json">复用字幕 JSON（可选，项目目录内路径）</label><input id="transcript-json" placeholder="例如 runs/任务编号/transcript.json"><p class="hint">填入已校对的字幕 JSON 可跳过语音转写。</p>
           </div>
@@ -51,19 +54,60 @@
             <h3 class="section-title"><span class="num">02</span>画面与输出</h3>
             <label>输出内容</label><div class="options">
               <label class="option"><input type="radio" name="output" value="assets"><strong>仅素材</strong><small>文字与字幕</small></label>
-              <label class="option"><input type="radio" name="output" value="mp4" checked><strong>MP4</strong><small>直接成片</small></label>
-              <label class="option"><input type="radio" name="output" value="jianying"><strong>剪映</strong><small>可编辑草稿</small></label>
+              <label class="option"><input type="radio" name="output" value="mp4"><strong>MP4</strong><small>直接成片</small></label>
+              <label class="option"><input type="radio" name="output" value="jianying" checked><strong>剪映</strong><small>可编辑草稿</small></label>
               <label class="option"><input type="radio" name="output" value="both"><strong>两者</strong><small>成片与草稿</small></label>
             </div>
-            <div class="row"><div><label for="scene-mode">场景分段</label><select id="scene-mode"><option value="none">不分段 · 黑色背景</option><option value="fixed">固定时长分段</option><option value="llm">大模型语义分段</option></select></div><div id="scene-seconds-wrap" class="hidden"><label for="scene-seconds">每段约多少秒</label><input id="scene-seconds" type="number" min="1" max="600" value="25"></div></div>
+            <div class="row"><div><label for="scene-mode">场景分段</label><select id="scene-mode"><option value="none">不分段 · 黑色背景</option><option value="fixed">固定时长分段</option><option value="llm" selected>大模型语义分段</option></select></div><div id="scene-seconds-wrap" class="hidden"><label for="scene-seconds">每段约多少秒</label><input id="scene-seconds" type="number" min="1" max="600" value="25"></div></div>
             <label for="motion-preset">基础运镜</label><select id="motion-preset"><option value="static">静止 · 原有方式</option><option value="auto">自动推荐 · 大模型逐场景选择</option><option value="push_in">缓慢推近</option><option value="pull_out">缓慢拉远</option><option value="pan_left">缓慢向左平移</option><option value="pan_right">缓慢向右平移</option><option value="parallax">分层视差 · 主角与背景独立运动</option></select><p class="hint">以下四组可以组合；每组只能选择一种方向。自动推荐会为每段选择基础运镜，组合动效仍会叠加。</p>
+            <div id="parallax-fields" class="hidden">
+              <label for="parallax-placement">强制分层视差的位置</label>
+              <select id="parallax-placement">
+                <option value="odd">奇数场景（1、3、5、7…）</option>
+                <option value="spaced_odd">每四段取一段（1、5、9…）</option>
+                <option value="even">偶数场景（2、4、6、8…）</option>
+                <option value="all">全部场景</option>
+                <option value="none">无（按基础运镜）</option>
+                <option value="manual">手动指定场景序号</option>
+              </select>
+              <div id="parallax-scenes-wrap" class="hidden">
+                <label for="parallax-scenes">场景序号（从 1 开始）</label>
+                <input id="parallax-scenes" type="text" placeholder="例如 1, 5, 9">
+              </div>
+              <details id="parallax-layer-effects" class="subtle hidden">
+                <summary>自定义分层动效</summary>
+                {% set effect_fields = [
+                  ('horizontal', '水平移动', [('left', '向左'), ('right', '向右')]),
+                  ('fade', '淡入淡出', [('in', '淡入'), ('out', '淡出'), ('in_out', '淡入并淡出')]),
+                  ('vertical', '垂直移动', [('up', '向上'), ('down', '向下')]),
+                  ('zoom', '推近拉远', [('in', '推近'), ('out', '拉远')])
+                ] %}
+                {% for layer, title in [('background', '背景'), ('foreground', '前景人物')] %}
+                <fieldset>
+                  <legend>{{ title }}</legend>
+                  <div class="row">
+                  {% for key, label, options in effect_fields %}
+                    <div><label for="parallax-{{ layer }}-{{ key }}">{{ label }}</label>
+                      <select id="parallax-{{ layer }}-{{ key }}">
+                        {% for value, name in [('none', '无')] + options %}
+                        <option value="{{ value }}"{% if parallax_effect_defaults[layer].get(key, 'none') == value %} selected{% endif %}>{{ name }}</option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                  {% endfor %}
+                  </div>
+                </fieldset>
+                {% endfor %}
+              </details>
+              <p class="hint" id="parallax-hint">开启 Draw Things 生图后，指定场景将使用分层视差。</p>
+            </div>
             <div class="row"><div><label for="effect-fade">淡入淡出</label><select id="effect-fade"><option value="none">无</option><option value="in">淡入</option><option value="out">淡出</option><option value="in_out">淡入并淡出</option></select></div><div><label for="effect-horizontal">水平移动</label><select id="effect-horizontal"><option value="none">无</option><option value="left">向左</option><option value="right">向右</option></select></div></div>
             <div class="row"><div><label for="effect-vertical">垂直移动</label><select id="effect-vertical"><option value="none">无</option><option value="up">向上</option><option value="down">向下</option></select></div><div><label for="effect-zoom">推近拉远</label><select id="effect-zoom"><option value="none">无</option><option value="in">推近</option><option value="out">拉远</option></select></div></div>
             <label class="toggle"><input id="generate-images" type="checkbox">调用 Draw Things 为场景生图</label>
             <div id="llm-fields" class="subtle hidden"><label for="llm-base-url">LLM API 地址</label><input id="llm-base-url" value="http://127.0.0.1:1234/v1"><div class="row"><div><label for="llm-model">模型名称</label><input id="llm-model" placeholder="例如 qwen3"></div><div><label for="llm-api-key">API Key（可选）</label><input id="llm-api-key" type="password" autocomplete="off"></div></div><label for="visual-style">全局画面设定（可选）</label><textarea id="visual-style" placeholder="例如：\n时代：北魏\n地点：邺城与北方战场\n气氛：苍凉、肃杀、史诗感\n画风：电影级历史写实，低饱和冷灰色\n镜头：远景与人物特写结合"></textarea><p class="hint">这些设定会加入语义分段及自动运镜的提示词，留空则由模型自行判断。</p></div>
             <div id="draw-fields" class="subtle hidden"><div class="row"><div><label for="drawthings-model">场景生图模型（本机已下载）</label><div class="inline"><select id="drawthings-model"><option value="">正在读取模型…</option></select><button id="refresh-models" class="ghost" type="button">刷新</button></div></div><div><label for="image-steps">生图步数（可选）</label><input id="image-steps" type="number" min="1" max="150" placeholder="模型推荐值"></div></div><label for="character-profile-id">角色基准图（可选）</label><div class="inline"><select id="character-profile-id"><option value="">不使用角色档案</option></select><a class="ghost" href="/characters" target="_blank" rel="noopener" style="text-decoration:none;white-space:nowrap">配置基准图</a><button id="refresh-characters" class="ghost" type="button">刷新</button></div><p id="character-status" class="hint">系统自动判断主角是否出镜；固定分段且没有配置大模型时默认不出镜，可在完成后编辑场景。</p><div class="row"><div><label for="image-seed">固定 seed</label><input id="image-seed" type="number" min="0" max="4294967295" value="271829"></div></div><label for="image-prompt-suffix">生图提示词固定后缀（可选）</label><textarea id="image-prompt-suffix" placeholder="例如：historical cinematic realism, natural skin texture, no text, no watermark"></textarea><label class="toggle"><input id="upscale-x2" type="checkbox">使用 Real-ESRGAN X2+ 放大</label><p class="hint">勾选后，下面的宽高是基础生图尺寸；图片、MP4 和剪映画布扩大 2 倍。例如输入 640×384，输出为 1280×768。运镜场景可能生成更大的原图。需要本机已下载 X2+ 模型。</p><p id="drawthings-status" class="hint">通过本机 Draw Things CLI 生图，不需要开启 HTTP 服务。</p></div>
             <div id="draft-fields" class="subtle hidden"><label for="jianying-drafts-dir">剪映草稿根目录（可选）</label><input id="jianying-drafts-dir" placeholder="留空自动读取剪映设置"><label for="draft-name">草稿名称（可选）</label><input id="draft-name" placeholder="默认使用音频文件名"><label class="toggle"><input id="register-jianying" type="checkbox">生成后注册到剪映首页</label><p id="jianying-status" class="hint">正在检测剪映…</p></div>
-            <div class="row three"><div><label for="width">宽度</label><input id="width" type="number" min="160" max="4096" step="2" value="1280"></div><div><label for="height">高度</label><input id="height" type="number" min="160" max="4096" step="2" value="720"></div><div><label for="fps">帧率</label><input id="fps" type="number" min="1" max="60" value="25"></div></div>
+            <div class="row three"><div><label for="width">宽度</label><input id="width" type="number" min="160" max="4096" step="2" value="768"></div><div><label for="height">高度</label><input id="height" type="number" min="160" max="4096" step="2" value="512"></div><div><label for="fps">帧率</label><input id="fps" type="number" min="1" max="60" value="25"></div></div>
           </div>
         </form>
         <div class="actions"><div id="error" class="error" role="alert"></div><button id="start" class="primary" type="submit" form="job-form">开始处理 →</button><p class="hint">设置自动保存在当前浏览器；API Key 不保存。任务在后台运行，页面可以刷新。</p><button id="reset-config" class="ghost" type="button">重设配置</button></div>
@@ -78,7 +122,11 @@
     const $ = id => document.getElementById(id);
     let activeJob = null, jobs = [], jianyingSupported = false, drawModelsLoaded = false, renderedKey = '', characterProfiles = {}, configReady = false;
     const configKey='wav-video.job-config.v1';
-    const configIds=['audio-id','whisper-model','language','quick-test','max-seconds','transcript-json','scene-mode','scene-seconds','motion-preset','effect-fade','effect-horizontal','effect-vertical','effect-zoom','generate-images','llm-base-url','llm-model','visual-style','drawthings-model','image-steps','character-profile-id','image-seed','upscale-x2','image-prompt-suffix','jianying-drafts-dir','draft-name','register-jianying','width','height','fps'];
+    const layerEffectKeys = ['fade', 'horizontal', 'vertical', 'zoom'];
+    function parallaxEffects(layer) {
+      return Object.fromEntries(layerEffectKeys.map(key => [key, $(`parallax-${layer}-${key}`).value]));
+    }
+    const configIds=['audio-id','whisper-model','language','quick-test','max-seconds','transcript-json','scene-mode','scene-seconds','motion-preset','parallax-placement','parallax-scenes',...Array.from(document.querySelectorAll('#parallax-layer-effects select'), select => select.id),'effect-fade','effect-horizontal','effect-vertical','effect-zoom','generate-images','llm-base-url','llm-model','visual-style','drawthings-model','image-steps','character-profile-id','image-seed','upscale-x2','image-prompt-suffix','jianying-drafts-dir','draft-name','register-jianying','width','height','fps'];
     let savedConfig=null;
     try{const parsed=JSON.parse(localStorage.getItem(configKey));if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))savedConfig=parsed}catch{}
     function saveConfig(){if(!configReady)return;const values={output:selectedOutput()};for(const id of configIds){const control=$(id);values[id]=control.type==='checkbox'?control.checked:control.value}try{localStorage.setItem(configKey,JSON.stringify(values))}catch{}}
@@ -110,7 +158,10 @@
           const option = document.createElement('option'); option.value = model.id;
           option.textContent = `${model.name} · ${model.id}`; select.append(option);
         }
-        const recommended = [...select.options].find(o => o.value.startsWith('z_image_turbo'));
+        const options = [...select.options];
+        const recommended = options.find(o => o.value === 'qwen_image_2.1_turbo_i8x.ckpt')
+          || options.find(o => o.value.startsWith('qwen_image_2.1_turbo'))
+          || options.find(o => o.value.startsWith('z_image_turbo'));
         if ([...select.options].some(o=>o.value===(preferred||previous))) select.value=preferred||previous;
         else if (recommended) select.value = recommended.value;
         if (!result.models.length) { select.add(new Option('没有检测到已下载模型', '')); }
@@ -121,7 +172,26 @@
     }
     function updateCharacterStatus(){const chosen=characterProfiles[$('character-profile-id').value];$('character-status').textContent=chosen?`使用 ${chosen.name} 的参考图；基准图模型为 ${chosen.model}，场景生图模型可单独选择。系统自动判断是否出镜，完成后可编辑。`:'选择已确认正面照的角色档案后，可按场景使用身份参考图。'}
     async function loadCharacters(preferred='') { try { const data=await api('/api/characters'), select=$('character-profile-id'), old=preferred||select.value; characterProfiles=Object.fromEntries(data.characters.map(item=>[item.id,item]));select.replaceChildren(new Option('不使用角色档案','')); for(const item of data.characters){const ready=item.views?.front?.status==='approved';const option=new Option(`${item.name} · ${ready?'可使用':'待确认正面照'}`,item.id);option.disabled=!ready;select.add(option)} if([...select.options].some(o=>o.value===old&&!o.disabled))select.value=old;updateCharacterStatus();updateFields();}catch(e){$('character-status').textContent=e.message;} }
-    function updateFields() { const scene = $('scene-mode').value; $('scene-seconds-wrap').classList.toggle('hidden', scene !== 'fixed'); if (scene === 'none') { $('generate-images').checked = false; $('motion-preset').value = 'static'; } $('llm-fields').classList.toggle('hidden', scene !== 'llm' && $('motion-preset').value !== 'auto' && !(scene === 'fixed' && $('character-profile-id').value)); $('generate-images').disabled = scene === 'none'; $('motion-preset').disabled = scene === 'none'; for(const id of ['effect-fade','effect-horizontal','effect-vertical','effect-zoom'])$(id).disabled=scene==='none'; $('draw-fields').classList.toggle('hidden', !$('generate-images').checked); $('draft-fields').classList.toggle('hidden', !['jianying','both'].includes(selectedOutput())); $('max-seconds').disabled = !$('quick-test').checked; }
+    function updateParallaxFields() {
+      const semantic = $('scene-mode').value === 'llm';
+      const enabled = semantic && $('generate-images').checked;
+      const placement = $('parallax-placement');
+      const manual = placement.value === 'manual';
+      $('parallax-fields').classList.toggle('hidden', !semantic);
+      placement.disabled = !enabled;
+      $('parallax-scenes-wrap').classList.toggle('hidden', !manual);
+      $('parallax-scenes').disabled = !enabled || !manual;
+      $('parallax-scenes').required = enabled && manual;
+      $('parallax-layer-effects').classList.toggle('hidden', !enabled || placement.value === 'none');
+      let hint = '开启 Draw Things 生图后可指定分层视差的位置。';
+      if (enabled) {
+        hint = placement.value === 'none'
+          ? '所有场景沿用基础运镜设置。'
+          : '指定场景使用独立的背景和前景动效，默认背景向右平移，前景淡入并淡出。';
+      }
+      $('parallax-hint').textContent = hint;
+    }
+    function updateFields() { const scene = $('scene-mode').value; $('scene-seconds-wrap').classList.toggle('hidden', scene !== 'fixed'); if (scene === 'none') { $('generate-images').checked = false; $('motion-preset').value = 'static'; } $('llm-fields').classList.toggle('hidden', scene !== 'llm' && $('motion-preset').value !== 'auto' && !(scene === 'fixed' && $('character-profile-id').value)); $('generate-images').disabled = scene === 'none'; $('motion-preset').disabled = scene === 'none'; for(const id of ['effect-fade','effect-horizontal','effect-vertical','effect-zoom'])$(id).disabled=scene==='none'; $('draw-fields').classList.toggle('hidden', !$('generate-images').checked); $('draft-fields').classList.toggle('hidden', !['jianying','both'].includes(selectedOutput())); $('max-seconds').disabled = !$('quick-test').checked; updateParallaxFields(); }
     async function loadAudio(selectId) { const data = await api('/api/audio'); const select = $('audio-id'); const old = selectId || select.value; select.replaceChildren(); for (const file of data.files) { const o = document.createElement('option'); o.value = file.id; o.textContent = file.name; select.append(o); } if (old && [...select.options].some(o => o.value === old)) select.value = old; if (!data.files.length) { const o = document.createElement('option'); o.textContent = '请先上传音频'; o.value = ''; select.append(o); } }
     function fileUrl(jobId, name) { return `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`; }
     function renderHistory() {
@@ -210,11 +280,11 @@
       }catch(e){$('upload-label').textContent='上传失败';error(e.message);}
       finally{$('upload-progress').classList.add('hidden');}
     };
-    for(const id of ['scene-mode','motion-preset','generate-images','quick-test'])$(id).addEventListener('change',updateFields);
+    for(const id of ['scene-mode','motion-preset','parallax-placement','generate-images','quick-test'])$(id).addEventListener('change',updateFields);
     document.querySelectorAll('input[name="output"]').forEach(x=>x.addEventListener('change',updateFields));
     $('job-form').addEventListener('input',saveConfig);$('job-form').addEventListener('change',saveConfig);
     $('reset-config').onclick=async()=>{configReady=false;savedConfig=null;try{localStorage.removeItem(configKey)}catch{}$('job-form').reset();$('audio-id').value='';$('drawthings-model').value='';$('character-profile-id').value='';$('llm-api-key').value='';updateFields();await Promise.all([loadAudio(),loadModels(true),loadCharacters()]);await checkJianying();configReady=true;error('');};
-    $('job-form').onsubmit=async event=>{event.preventDefault();error('');const data={audio_id:$('audio-id').value,output:selectedOutput(),scene_mode:$('scene-mode').value,scene_seconds:$('scene-seconds').value,motion_preset:$('motion-preset').value,motion_effects:{fade:$('effect-fade').value,horizontal:$('effect-horizontal').value,vertical:$('effect-vertical').value,zoom:$('effect-zoom').value},whisper_model:$('whisper-model').value,language:$('language').value,transcript_json:$('transcript-json').value.trim(),max_seconds:$('quick-test').checked?$('max-seconds').value:null,generate_images:$('generate-images').checked,llm_base_url:$('llm-base-url').value.trim(),llm_model:$('llm-model').value.trim(),llm_api_key:$('llm-api-key').value,visual_style:$('visual-style').value.trim(),drawthings_model:$('drawthings-model').value.trim(),image_steps:$('image-steps').value,image_seed:$('image-seed').value,upscale_x2:$('upscale-x2').checked,image_prompt_suffix:$('image-prompt-suffix').value.trim(),character_profile_id:$('character-profile-id').value,jianying_drafts_dir:$('jianying-drafts-dir').value.trim(),draft_name:$('draft-name').value.trim(),register_jianying:$('register-jianying').checked,width:$('width').value,height:$('height').value,fps:$('fps').value};$('start').disabled=true;try{const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});activeJob=job.id;$('llm-api-key').value='';await refreshJobs();}catch(e){error(e.message);}finally{$('start').disabled=false;}};
+    $('job-form').onsubmit=async event=>{event.preventDefault();error('');const data={audio_id:$('audio-id').value,output:selectedOutput(),scene_mode:$('scene-mode').value,scene_seconds:$('scene-seconds').value,motion_preset:$('motion-preset').value,parallax_placement:$('parallax-placement').disabled?'none':$('parallax-placement').value,parallax_scenes:$('parallax-scenes').disabled?'':$('parallax-scenes').value,parallax_background_effects:parallaxEffects('background'),parallax_foreground_effects:parallaxEffects('foreground'),motion_effects:{fade:$('effect-fade').value,horizontal:$('effect-horizontal').value,vertical:$('effect-vertical').value,zoom:$('effect-zoom').value},whisper_model:$('whisper-model').value,language:$('language').value,transcript_json:$('transcript-json').value.trim(),max_seconds:$('quick-test').checked?$('max-seconds').value:null,generate_images:$('generate-images').checked,llm_base_url:$('llm-base-url').value.trim(),llm_model:$('llm-model').value.trim(),llm_api_key:$('llm-api-key').value,visual_style:$('visual-style').value.trim(),drawthings_model:$('drawthings-model').value.trim(),image_steps:$('image-steps').value,image_seed:$('image-seed').value,upscale_x2:$('upscale-x2').checked,image_prompt_suffix:$('image-prompt-suffix').value.trim(),character_profile_id:$('character-profile-id').value,jianying_drafts_dir:$('jianying-drafts-dir').value.trim(),draft_name:$('draft-name').value.trim(),register_jianying:$('register-jianying').checked,width:$('width').value,height:$('height').value,fps:$('fps').value};$('start').disabled=true;try{const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});activeJob=job.id;$('llm-api-key').value='';await refreshJobs();}catch(e){error(e.message);}finally{$('start').disabled=false;}};
     restoreConfig();updateFields();checkJianying();Promise.all([loadAudio(savedConfig?.['audio-id']),loadModels(false,savedConfig?.['drawthings-model']),loadCharacters(savedConfig?.['character-profile-id'])]).then(()=>{configReady=true}).catch(e=>error(e.message));refreshJobs();setInterval(refreshJobs,2500);
   </script>
 </body>

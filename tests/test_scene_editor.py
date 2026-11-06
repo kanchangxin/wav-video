@@ -1,9 +1,11 @@
 import io
 import json
+import shlex
 import shutil
 import subprocess
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +14,42 @@ from web_app import create_app
 
 
 class SceneEditorTests(unittest.TestCase):
+    def test_saves_batch_into_one_sync_and_concurrent_edits_stay_dirty(self):
+        manager = self.app.extensions["job_manager"]
+        manager.jobs["testjob"]["options"]["output"] = "both"
+        manager.jobs["testjob"]["registered_draft"] = str(self.root / "drafts" / "old")
+        for effects in ({"fade": "in"}, {"zoom": "out"}):
+            response = self.client.patch("/api/jobs/testjob/editor/motion/1/image", json={"effects": effects})
+            self.assertIsNone(response.get_json()["rebuild"])
+        self.client.patch("/api/jobs/testjob/editor/captions/1", json={"captions": [{"index": 0, "text": "合并字幕"}]})
+        self.assertEqual(self.client.get("/api/jobs/testjob/editor/tasks").get_json()["tasks"], [])
+        started, release = threading.Event(), threading.Event()
+        def render(audio, scenes, srt, output, width, height, fps):
+            started.set()
+            release.wait(5)
+            output.write_bytes(b"video")
+        with patch("scene_editor.render_mp4", side_effect=render), patch("scene_editor.register_draft", return_value=self.root / "drafts" / "new") as register:
+            first = self.client.post("/api/jobs/testjob/editor/sync-jianying")
+            self.assertEqual(first.status_code, 202)
+            self.assertTrue(started.wait(3))
+            second = self.client.post("/api/jobs/testjob/editor/sync-jianying")
+            self.assertEqual(first.get_json()["id"], second.get_json()["id"])
+            self.client.patch("/api/jobs/testjob/editor/captions/1", json={"captions": [{"index": 0, "text": "下一次修改"}]})
+            release.set()
+            for _ in range(150):
+                task = self.client.get('/api/jobs/testjob/editor/candidates/' + first.get_json()["id"]).get_json()
+                if task["status"] in ("completed", "failed"):
+                    break
+                time.sleep(0.02)
+            self.assertEqual(task["status"], "completed", task)
+            self.assertEqual(register.call_count, 1)
+        draft = Path((self.output / "jianying_draft_path.txt").read_text().strip())
+        self.assertIn("合并字幕", (draft / "draft_content.json").read_text())
+        self.assertNotIn("下一次修改", (draft / "draft_content.json").read_text())
+        state = self.client.get("/api/jobs/testjob/editor/tasks").get_json()
+        self.assertTrue(state["needs_sync"])
+        self.assertEqual(len(state["tasks"]), 1)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -64,8 +102,116 @@ class SceneEditorTests(unittest.TestCase):
         self.assertIn('id="scene-current"', html)
         self.assertIn('id="scene-search"', html)
         self.assertIn('本场景字幕', html)
+        self.assertIn('用原图补空背景', html)
+        self.assertIn('AI 提取整组前景', html)
+        self.assertIn('从原图抠人物', html)
+        self.assertIn('缺少空背景', html)
+        self.assertIn('前景未包含坐骑或道具', html)
         self.assertNotIn('id="reference-paths"', html)
         self.assertEqual(self.client.get("/api/jobs/testjob/editor/tasks").status_code, 200)
+
+    def test_parallax_suggestions_use_source_image_and_ai_foreground_keeps_source(self):
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scenes[0].update({"motion": "parallax", "character_present": True,
+                          "prompt": "主角骑马，手持长矛"})
+        (self.output / "scenes.json").write_text(json.dumps(scenes, ensure_ascii=False))
+        self.app.extensions["job_manager"].jobs["testjob"]["options"]["image_prompt_suffix"] = "积雪覆盖军营"
+        request_path = self.output / "images" / "scene_001_foreground.request.json"
+        request_path.write_text(json.dumps({
+            "method": "ai_edit", "references": [str(self.image)],
+            "prompt": "以 image 1 为原图，精确提取前景主体：主角及其坐骑、手持武器和相关道具。"
+                      "保留原有面容、服饰、姿态、相对位置和轮廓。删除所有背景，背景像素必须真正透明（PNG alpha），"
+                      "不要绘制棋盘格、纯色背景、文字或新物体；主体保持原图中的位置和大小。"
+                      "\n场景设定：主角骑马，手持长矛\n积雪覆盖军营",
+        }, ensure_ascii=False))
+        inventory = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]
+        background = next(layer for layer in inventory["layers"] if layer["name"] == "background")
+        foreground = next(layer for layer in inventory["layers"] if layer["name"] == "foreground")
+        self.assertIn("--image", background["source_edit_command"])
+        self.assertIn(str(self.image.resolve()), background["source_edit_command"])
+        self.assertIn("--image", foreground["ai_edit_command"])
+        for command in (foreground["command"], foreground["ai_edit_command"]):
+            tokens = shlex.split(command)
+            self.assertEqual(tokens[tokens.index("--prompt") + 1], "把image1 背景透明")
+            self.assertEqual(tokens[tokens.index("--image") + 1], str(self.image.resolve()))
+        transparent = self.root / "transparent.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "color=c=blue@0.5:s=320x192:d=0.04,format=rgba", "-frames:v", "1", str(transparent)], check=True)
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: shutil.copy2(transparent, path)) as generated:
+            response = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "foreground", "command": foreground["command"].replace("--width 320", "--width 384")})
+            self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+            task_id = response.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertTrue(task["params"]["mask_from_source"])
+        candidate_rgb = subprocess.check_output(["ffmpeg", "-v", "error", "-i", task["candidate"],
+                                                  "-vf", "crop=1:1:8:8,format=rgb24", "-frames:v", "1",
+                                                  "-f", "rawvideo", "-"])
+        self.assertGreater(candidate_rgb[0], 240)
+        self.assertEqual(candidate_rgb[1:], bytes([0, 0]))
+        self.assertEqual(generated.call_args.kwargs["reference_mode"], "instruction")
+        self.assertEqual(self.client.post(f"/api/jobs/testjob/editor/candidates/{task_id}/accept").status_code, 200)
+        self.assertEqual(self.image.read_bytes(), self.original)
+        updated = next(layer for layer in self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"]
+                       if layer["name"] == "foreground")
+        self.assertIn("--width 384", updated["command"])
+
+    def test_cutout_from_scene_queues_foreground_candidate(self):
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scenes[0]["motion"] = "parallax"
+        (self.output / "scenes.json").write_text(json.dumps(scenes))
+        transparent = self.root / "transparent.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "color=c=red@0.5:s=320x192:d=0.04,format=rgba", "-frames:v", "1", str(transparent)], check=True)
+        real_run = subprocess.run
+        def fake_cutout(command, **kwargs):
+            if Path(command[0]).name != "person_cutout":
+                return real_run(command, **kwargs)
+            shutil.copy2(transparent, command[2])
+            return subprocess.CompletedProcess(command, 0)
+        with patch("scene_editor.subprocess.run", side_effect=fake_cutout):
+            response = self.client.post("/api/jobs/testjob/editor/candidates/cutout", json={"scene": 1})
+            self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+            task_id = response.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(task["layer"], "foreground")
+
+    def test_background_source_edit_stays_candidate_until_accepted(self):
+        scenes = json.loads((self.output / "scenes.json").read_text())
+        scenes[0]["motion"] = "parallax"
+        (self.output / "scenes.json").write_text(json.dumps(scenes))
+        background = next(layer for layer in self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]["layers"]
+                          if layer["name"] == "background")
+        expected_prompt = "把 image 1 前景删除，只保留背景，并补全背景"
+        self.assertEqual(background["references"], [str(self.image.resolve())])
+        with patch("scene_editor.generate_image", side_effect=lambda prompt, path, model, width, height, steps, **kw: shutil.copy2(self.image, path)) as generated:
+            queued = self.client.post("/api/jobs/testjob/editor/candidates/generate", json={
+                "scene": 1, "layer": "background", "command": background["source_edit_command"]})
+            self.assertEqual(queued.status_code, 202, queued.get_data(as_text=True))
+            task_id = queued.get_json()["id"]
+            for _ in range(100):
+                task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
+                if task["status"] in ("ready", "failed"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(generated.call_args.args[0], expected_prompt)
+        self.assertEqual(generated.call_args.args[3:5], (448, 192))
+        self.assertEqual(generated.call_args.kwargs["references"], [self.image.resolve()])
+        self.assertEqual(generated.call_args.kwargs["reference_mode"], "instruction")
+        self.assertIsNone(json.loads((self.output / "scenes.json").read_text())[0]["background"])
+        self.assertEqual(self.client.post(f"/api/jobs/testjob/editor/candidates/{task_id}/accept").status_code, 200)
+        self.assertTrue(json.loads((self.output / "scenes.json").read_text())[0]["background"])
 
     def test_scene_subtitle_edit_updates_transcript_and_srt(self):
         scene = self.client.get("/api/jobs/testjob/editor").get_json()["scenes"][0]
@@ -88,7 +234,8 @@ class SceneEditorTests(unittest.TestCase):
         saved = self.client.patch("/api/jobs/testjob/editor/captions/1", json={
             "captions": [{"index": 0, "text": "新字幕"}]})
         self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
-        task_id = saved.get_json()["rebuild"]["id"]
+        self.assertIsNone(saved.get_json()["rebuild"])
+        task_id = self.client.post("/api/jobs/testjob/editor/rebuild").get_json()["id"]
         for _ in range(200):
             task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
             if task["status"] in ("completed", "failed"):
@@ -359,13 +506,10 @@ class SceneEditorTests(unittest.TestCase):
         replacement = self.root / "replacement.png"
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=green:s=320x192:d=0.04",
                         "-frames:v", "1", str(replacement)], check=True)
-        original_run = subprocess.run
-        def fake_cutout(command, **kwargs):
-            if Path(command[0]).name == "person_cutout":
-                shutil.copy2(replacement_mask, command[2])
-                return subprocess.CompletedProcess(command, 0)
-            return original_run(command, **kwargs)
-        with patch("scene_editor.subprocess.run", side_effect=fake_cutout):
+        def fake_generate(prompt, path, *args, **kwargs):
+            shutil.copy2(replacement_mask, path)
+        with patch("scene_editor.generate_image", side_effect=fake_generate) as generated, \
+             patch("scene_editor.list_models", return_value=[{"id": "qwen_image_2.1_turbo_i8x.ckpt"}]):
             submitted = self.client.post("/api/jobs/testjob/editor/candidates/upload", data={
                 "scene": "1", "layer": "image", "file": (io.BytesIO(replacement.read_bytes()), "replacement.png")}).get_json()
             for _ in range(100):
@@ -374,9 +518,12 @@ class SceneEditorTests(unittest.TestCase):
                     break
                 time.sleep(0.02)
         self.assertEqual(task["status"], "ready", task)
+        self.assertEqual(generated.call_args.args[0], "把image1 背景透明")
+        self.assertEqual(generated.call_args.kwargs["reference_mode"], "instruction")
+        self.assertEqual(generated.call_args.kwargs["references"], [Path(task["candidate"])])
         self.assertEqual(self.client.post(f"/api/jobs/testjob/editor/candidates/{task['id']}/accept").status_code, 200)
         self.assertEqual(self.image.read_bytes(), replacement.read_bytes())
-        self.assertEqual(foreground.read_bytes(), replacement_mask.read_bytes())
+        self.assertEqual(json.loads((self.output / "scenes.json").read_text())[0]["foreground_method"], "ai")
 
     def test_motion_update_rebuilds_mp4_and_jianying_draft_in_queue(self):
         manager = self.app.extensions["job_manager"]
@@ -385,7 +532,8 @@ class SceneEditorTests(unittest.TestCase):
         response = self.client.patch("/api/jobs/testjob/editor/motion/1/image", json={
             "effects": {"fade": "in_out", "vertical": "up", "zoom": "out"}})
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        rebuild = response.get_json()["rebuild"]
+        self.assertIsNone(response.get_json()["rebuild"])
+        rebuild = self.client.post("/api/jobs/testjob/editor/rebuild").get_json()
         for _ in range(200):
             task = self.client.get(f"/api/jobs/testjob/editor/candidates/{rebuild['id']}").get_json()
             if task["status"] in ("completed", "failed"):
@@ -413,7 +561,7 @@ class SceneEditorTests(unittest.TestCase):
         (self.output / "scenes.json").write_text(json.dumps(scenes))
         response = self.client.patch("/api/jobs/testjob/editor/motion/1/foreground", json={"effects": {"vertical": "up"}})
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        task_id = response.get_json()["rebuild"]["id"]
+        task_id = self.client.post("/api/jobs/testjob/editor/rebuild").get_json()["id"]
         for _ in range(150):
             task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
             if task["status"] in ("completed", "failed"):
@@ -445,7 +593,7 @@ class SceneEditorTests(unittest.TestCase):
         with patch("scene_editor.render_mp4", side_effect=lambda audio, scenes, srt, output, width, height, fps: output.write_bytes(b"new video")), \
              patch("scene_editor.export_jianying", side_effect=RuntimeError("draft failed")):
             response = self.client.patch("/api/jobs/testjob/editor/motion/1/image", json={"effects": {"fade": "in"}})
-            task_id = response.get_json()["rebuild"]["id"]
+            task_id = self.client.post("/api/jobs/testjob/editor/rebuild").get_json()["id"]
             for _ in range(100):
                 task = self.client.get(f"/api/jobs/testjob/editor/candidates/{task_id}").get_json()
                 if task["status"] in ("completed", "failed"):

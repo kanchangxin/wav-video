@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from audio_video import Caption, Scene, compose_scene_prompt, export_jianying, r
 from drawthings_cli import X2_CONFIG, cli_path, generate_image, list_models, upscaler_available
 from jianying_register import register_draft
 from scene_motion import PRESETS, generation_size, normalize_effects
+from parallax_layers import apply_foreground_mask, background_prompt, foreground_prompt, foreground_mode, preferred_edit_model
 
 
 LAYER_KEYS = {"image": "image", "background": "background", "foreground": "foreground"}
@@ -101,8 +103,11 @@ class SceneEditor:
         if layer == "background":
             metadata = folder / "images" / f"scene_{index:03}_background.request.json"
             background_record = json.loads(metadata.read_text(encoding="utf-8")) if metadata.is_file() else {}
-            prompt = background_record.get("prompt") or scene["prompt"] + "\nEmpty environment, no people, no text."
-            references = background_record.get("references") or []
+            prompt = background_prompt()
+            if background_record.get("references_customized"):
+                references = background_record.get("references") or []
+            else:
+                references = [str(Path(scene["image"]).resolve())] if scene.get("image") else []
             width = int(background_record.get("width") or record.get("width") or options.get("width") or 1280)
             height = int(background_record.get("height") or record.get("height") or options.get("height") or 720)
             existing = scene.get("background")
@@ -116,11 +121,18 @@ class SceneEditor:
                     except ValueError:
                         pass
         else:
-            prompt = record.get("prompt") or scene["prompt"]
-            references = record.get("references") or []
-            width = int(record.get("width") or options.get("width") or 1280)
-            height = int(record.get("height") or options.get("height") or 720)
-            if scene.get("character_present") and not references and not record.get("references_customized"):
+            foreground_record = {}
+            if layer == "foreground":
+                foreground_path = folder / "images" / f"scene_{index:03}_foreground.request.json"
+                foreground_record = json.loads(foreground_path.read_text(encoding="utf-8")) if foreground_path.is_file() else {}
+            prompt = foreground_record.get("prompt") or record.get("prompt") or scene["prompt"]
+            references = foreground_record.get("references") or record.get("references") or []
+            width = int(foreground_record.get("width") or record.get("width") or options.get("width") or 1280)
+            height = int(foreground_record.get("height") or record.get("height") or options.get("height") or 720)
+            if layer == "foreground":
+                prompt = foreground_prompt()
+                references = [str(Path(scene["image"]).resolve())] if scene.get("image") else []
+            elif scene.get("character_present") and not references and not record.get("references_customized"):
                 snapshot = folder / "character_reference"
                 refs = [snapshot / name for name in ("front.png", "three_quarter.png", "full_body.png")]
                 references = [str(path) for path in refs if path.is_file()]
@@ -129,14 +141,17 @@ class SceneEditor:
                     name = json.loads(profile.read_text(encoding="utf-8")).get("name", "主角")
                     prompt = compose_scene_prompt(scene["prompt"], str(options.get("image_prompt_suffix") or ""),
                                                   name, True, True)
-        source_record = background_record or record
+        source_record = background_record or (foreground_record if layer == "foreground" else {}) or record
         upscale_x2 = bool(source_record.get("upscale_x2", options.get("upscale_x2", False)))
         if layer != "foreground" and (layer == "background" or scene.get("motion") != "parallax"):
-            needed_width, needed_height = generation_size(int(options.get("width") or 1280),
-                                                           int(options.get("height") or 720),
-                                                           scene.get("motion") or "static",
-                                                           scene.get("motion_effects") or {})
-            width, height = max(width, needed_width), max(height, needed_height)
+            preset = scene.get("motion") or "static"
+            if preset == "parallax" and scene.get("independent_layer_motion"):
+                preset = "static"
+            base_width = int(options.get("width") or 1280)
+            base_height = int(options.get("height") or 720)
+            needed_width, needed_height = generation_size(base_width, base_height, preset, scene.get("motion_effects"))
+            width = max(width, needed_width)
+            height = needed_height if needed_width > base_width and needed_height == base_height else max(height, needed_height)
         if upscale_x2:
             width, height = (width + 63) // 64 * 64, (height + 63) // 64 * 64
         else:
@@ -228,7 +243,7 @@ class SceneEditor:
                 raise ValueError("只支持 Real-ESRGAN X2+ 放大配置")
             if not upscaler_available():
                 raise ValueError("未找到本地 Real-ESRGAN X2+ 模型文件")
-        if model != original["model"] and model not in {item["id"] for item in list_models()}:
+        if model != original["model"] and model not in {item["id"] for item in list_models(include_edit=True)}:
             raise ValueError("请选择本机已下载的 Draw Things 模型")
         return {"prompt": found["--prompt"], "model": model, "width": width, "height": height,
                 "steps": steps, "seed": seed, "references": references, "output": original["output"],
@@ -266,6 +281,10 @@ class SceneEditor:
         record_path = folder / "image_generation.json"
         records = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else []
         options = self.manager.get(job_id).get("options", {})
+        try:
+            edit_models = list_models(include_edit=True)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            edit_models = []
         result = []
         for i, scene in enumerate(scenes, 1):
             layers = []
@@ -281,16 +300,34 @@ class SceneEditor:
                     tool = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
                     cutout_command = shlex.join([str(tool), params["output"],
                                                   str(path or folder / "images" / f"scene_{i:03}_foreground.png")])
+                suggestions = {}
+                source_image = scene.get("image")
+                if source_image and layer in {"background", "foreground"}:
+                    params["model"] = preferred_edit_model(edit_models, str(params["model"]))
+                    suggested = dict(params)
+                    suggested["references"] = [str(Path(source_image).resolve())]
+                    if layer == "background":
+                        suggested["prompt"] = background_prompt()
+                        suggestions["source_edit_command"] = self._command(suggested)
+                    else:
+                        image_params = self._params(folder, i, "image", scene=scene,
+                                                    record=records[i - 1] if i <= len(records) else {}, options=options)
+                        suggested["width"], suggested["height"] = image_params["width"], image_params["height"]
+                        suggested["prompt"] = foreground_prompt()
+                        suggestions["ai_edit_command"] = self._command(suggested)
                 layers.append({"name": layer, "url": f"/api/jobs/{job_id}/editor/assets/{i}/{layer}" if local else None,
                                "command": self._command(params), "source": path,
                                "references": params["references"],
                                "cutout_command": cutout_command,
                                "derived": layer == "foreground",
                                "upscale_x2": params["upscale_x2"],
-                               "motion_effects": scene.get("foreground_effects", {}) if layer == "foreground" else scene.get("motion_effects", {})})
+                               "motion_effects": scene.get("foreground_effects", {}) if layer == "foreground" else scene.get("motion_effects", {}),
+                               **suggestions})
             result.append({"index": i, "start": scene["start"], "end": scene["end"],
                            "prompt": scene["prompt"], "character_present": scene.get("character_present", False),
                            "motion": scene.get("motion", "static"), "motion_reason": scene.get("motion_reason", ""),
+                           "foreground_method": scene.get("foreground_method", ""),
+                           "composite_foreground_required": foreground_mode(scene["prompt"]) == "ai",
                            "motion_effects": scene.get("motion_effects", {}),
                            "foreground_effects": scene.get("foreground_effects", {}),
                            "captions": [{"index": j, **caption} for j, caption in enumerate(captions)
@@ -337,7 +374,7 @@ class SceneEditor:
             json_pending.replace(path)
             srt_pending.replace(srt)
             text_pending.replace(text)
-            return {"saved": True, "rebuild": self._queue_rebuild(job_id)}
+            return {"saved": True, "rebuild": self._mark_dirty(job_id)}
 
     def tasks(self, job_id: str) -> dict:
         folder = self._folder(job_id)
@@ -350,6 +387,7 @@ class SceneEditor:
         visible = active + recent
         visible.sort(key=lambda task: task.get("created", ""), reverse=True)
         return {"tasks": visible, "registered_draft": job.get("registered_draft"),
+                "needs_rebuild": (folder / "edits" / "needs_rebuild").is_file(),
                 "needs_sync": bool(job.get("registered_draft") and (folder / "edits" / "needs_sync").is_file())}
 
     def asset(self, job_id: str, index: int, layer: str) -> Path:
@@ -382,7 +420,7 @@ class SceneEditor:
         return task
 
     def generate(self, job_id: str, index: int, layer: str, command: str,
-                 references: list[str] | None = None) -> dict:
+                 references: list[str] | None = None, mode: str = "standard") -> dict:
         folder = self._folder(job_id)
         if layer not in LAYER_KEYS:
             raise ValueError("图层无效")
@@ -391,9 +429,30 @@ class SceneEditor:
         changed_in_command = params["references"] != original["references"]
         if references is not None:
             params["references"] = self._validate_references(references)
+        source_image = self._scene(folder, index).get("image")
+        if mode == "standard" and layer in {"background", "foreground"} and source_image and params["references"] and \
+                Path(params["references"][0]).resolve() == Path(source_image).resolve():
+            mode = "source_edit" if layer == "background" else "ai_edit"
+        if mode not in {"standard", "source_edit", "ai_edit"}:
+            raise ValueError("图层生成方式无效")
+        if mode != "standard":
+            expected_layer = "background" if mode == "source_edit" else "foreground"
+            if layer != expected_layer or not source_image or not params["references"] or \
+                    Path(params["references"][0]).resolve() != Path(source_image).resolve():
+                raise ValueError("参考图编辑必须以当前场景原图作为 image 1")
+            params["reference_mode"] = "instruction"
+            params["method"] = mode
         params["references_customized"] = bool(original["references_customized"] or
                                                 changed_in_command or references is not None)
         return self._new_task(job_id, index, layer, "generate", params=params)
+
+    def cutout_from_scene(self, job_id: str, index: int) -> dict:
+        folder = self._folder(job_id)
+        scene = self._scene(folder, index)
+        source = scene.get("image")
+        if scene.get("motion") != "parallax" or not source or not Path(source).is_file():
+            raise ValueError("请先准备分层视差的场景原图")
+        return self._new_task(job_id, index, "foreground", "cutout", source_image=str(Path(source).resolve()))
 
     def upload(self, job_id: str, index: int, layer: str, stream: BinaryIO, filename: str) -> dict:
         if Path(filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -445,6 +504,13 @@ class SceneEditor:
         self.pending.put((job_id, task["id"]))
         return task
 
+    def _mask_ai_foreground(self, source: Path, candidate: Path) -> None:
+        validate_foreground(candidate)
+        masked = candidate.with_name(candidate.stem + "_masked.png")
+        apply_foreground_mask(source, candidate, masked)
+        validate_foreground(masked)
+        masked.replace(candidate)
+
     def _work(self) -> None:
         while True:
             job_id, task_id = self.pending.get()
@@ -459,10 +525,12 @@ class SceneEditor:
                 if task["kind"] == "generate":
                     params = task["params"]
                     target = Path(task["candidate"])
-                    source = target.with_name(target.stem + "_source.png") if task["layer"] == "foreground" else target
+                    ai_edit = params.get("method") == "ai_edit"
+                    source = target.with_name(target.stem + "_source.png") if task["layer"] == "foreground" and not ai_edit else target
                     generate_image(params["prompt"], source, params["model"], params["width"], params["height"],
                                    params["steps"], seed=params["seed"],
                                    references=[Path(path) for path in params["references"]],
+                                   reference_mode=params.get("reference_mode", "moodboard"),
                                    upscale_x2=params["upscale_x2"],
                                    progress=lambda percent: self._set_progress(job_id, task_id, percent))
                 if task["kind"] == "upload":
@@ -475,18 +543,38 @@ class SceneEditor:
                         subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(candidate),
                                         "-frames:v", "1", str(converted)], check=True, timeout=60)
                         converted.replace(candidate)
+                if task["kind"] == "cutout":
+                    tool = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
+                    subprocess.run([str(tool), task["source_image"], task["candidate"]], check=True, timeout=300)
+                    validate_foreground(Path(task["candidate"]))
                 if task["layer"] == "foreground" and task["kind"] == "upload":
                     validate_foreground(Path(task["candidate"]))
-                elif task["kind"] in ("generate", "upload") and (task["layer"] == "foreground" or (task["layer"] == "image" and
-                        (self._scene(folder, task["scene"]).get("foreground") or
-                         self._scene(folder, task["scene"]).get("motion") == "parallax"))):
-                    source = (Path(task["candidate"]).with_name(Path(task["candidate"]).stem + "_source.png")
-                              if task["layer"] == "foreground" and task["kind"] == "generate" else Path(task["candidate"]))
-                    cutout = (Path(task["candidate"]) if task["layer"] == "foreground" else
-                              Path(task["candidate"]).with_name(Path(task["candidate"]).stem + "_cutout.png"))
-                    tool = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
-                    subprocess.run([str(tool), str(source), str(cutout)], check=True, timeout=300)
-                    validate_foreground(cutout)
+                elif task["layer"] == "foreground" and task["kind"] == "generate":
+                    candidate = Path(task["candidate"])
+                    if task["params"].get("method") == "ai_edit":
+                        self._mask_ai_foreground(Path(task["params"]["references"][0]), candidate)
+                        task["params"]["mask_from_source"] = True
+                    else:
+                        source = candidate.with_name(candidate.stem + "_source.png")
+                        tool = Path(__file__).resolve().parent / "tools" / "drawthings" / "person_cutout"
+                        subprocess.run([str(tool), str(source), str(candidate)], check=True, timeout=300)
+                        validate_foreground(candidate)
+                if task["layer"] == "image" and task["kind"] in ("generate", "upload"):
+                    scene = self._scene(folder, task["scene"])
+                    if scene.get("foreground") or scene.get("motion") == "parallax":
+                        source = Path(task["candidate"])
+                        foreground = source.with_name(source.stem + "_cutout.png")
+                        params = task["params"]
+                        try:
+                            model = preferred_edit_model(list_models(include_edit=True), params["model"])
+                        except (OSError, RuntimeError, subprocess.SubprocessError):
+                            model = params["model"]
+                        generate_image(foreground_prompt(), foreground, model, params["width"], params["height"],
+                                       params["steps"], seed=params["seed"], references=[source],
+                                       reference_mode="instruction",
+                                       upscale_x2=params["upscale_x2"] and task["kind"] == "generate")
+                        self._mask_ai_foreground(source, foreground)
+                        task["derived_foreground_method"] = "ai"
                 if task["kind"] == "rebuild":
                     self._rebuild(job_id, task_id)
                 with self.lock:
@@ -537,7 +625,10 @@ class SceneEditor:
                 original = folder / "images" / f"scene_{task['scene']:03}{'_' + layer if layer != 'image' else ''}.png"
             self._replace(folder, original, Path(task["candidate"]))
             scene[layer] = str(original)
-            if layer == "foreground" and task["kind"] == "generate":
+            if layer == "foreground":
+                scene["foreground_method"] = ("ai" if task.get("params", {}).get("method") == "ai_edit"
+                                              else "upload" if task["kind"] == "upload" else "cutout")
+            if layer == "foreground" and task["kind"] == "generate" and task.get("params", {}).get("method") != "ai_edit":
                 source = Path(task["candidate"]).with_name(Path(task["candidate"]).stem + "_source.png")
                 if scene.get("image"):
                     source_target = Path(scene["image"]).resolve()
@@ -552,19 +643,23 @@ class SceneEditor:
                     foreground_target = folder / "images" / f"scene_{task['scene']:03}_foreground.png"
                 self._replace(folder, foreground_target, cutout)
                 scene["foreground"] = str(foreground_target)
+                scene["foreground_method"] = task.get("derived_foreground_method", "cutout")
             (folder / "scenes.json").write_text(json.dumps(scenes, ensure_ascii=False, indent=2), encoding="utf-8")
             if task.get("params"):
                 record_path = folder / "image_generation.json"
                 records = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else []
-                if len(records) >= task["scene"] and (layer == "image" or (layer == "foreground" and task["kind"] == "generate")):
+                if len(records) >= task["scene"] and (layer == "image" or (layer == "foreground" and task["kind"] == "generate" and task["params"].get("method") != "ai_edit")):
                     records[task["scene"] - 1].update({key: value for key, value in task["params"].items() if key != "output"})
                     record_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
                 elif layer == "background":
                     metadata = folder / "images" / f"scene_{task['scene']:03}_background.request.json"
                     metadata.write_text(json.dumps(task["params"], ensure_ascii=False, indent=2), encoding="utf-8")
+                elif layer == "foreground" and task["params"].get("method") == "ai_edit":
+                    metadata = folder / "images" / f"scene_{task['scene']:03}_foreground.request.json"
+                    metadata.write_text(json.dumps(task["params"], ensure_ascii=False, indent=2), encoding="utf-8")
             task["status"] = "accepted"
             self._save_task(folder, task)
-            return {"accepted": True, "rebuild": self._queue_rebuild(job_id)}
+            return {"accepted": True, "rebuild": self._mark_dirty(job_id)}
 
     def discard(self, job_id: str, task_id: str) -> dict:
         folder = self._folder(job_id)
@@ -596,18 +691,27 @@ class SceneEditor:
                     raise ValueError("主角出镜标记无效")
                 scene["character_present"] = character_present
             (folder / "scenes.json").write_text(json.dumps(scenes, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {"saved": True, "rebuild": self._queue_rebuild(job_id)}
+            return {"saved": True, "rebuild": self._mark_dirty(job_id)}
 
-    def _queue_rebuild(self, job_id: str) -> dict | None:
+    def _mark_dirty(self, job_id: str) -> None:
         folder = self._folder(job_id)
-        output = self.manager.get(job_id)["options"].get("output")
-        if output not in ("mp4", "jianying", "both"):
-            return None
+        if self.manager.get(job_id)["options"].get("output") not in ("mp4", "jianying", "both"):
+            return
+        revision = uuid.uuid4().hex
+        marker = folder / "edits" / "needs_rebuild"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(revision)
         if self.manager.get(job_id).get("registered_draft"):
-            marker = folder / "edits" / "needs_sync"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("1")
-        return self._new_task(job_id, 1, "image", "rebuild")
+            (marker.parent / "needs_sync").write_text(revision)
+
+    def _queue_rebuild(self, job_id: str, sync: bool = False) -> dict | None:
+        folder = self._folder(job_id)
+        if self.manager.get(job_id)["options"].get("output") not in ("mp4", "jianying", "both"):
+            return None
+        for task in self.tasks(job_id)["tasks"]:
+            if task["kind"] == "rebuild" and task["status"] in ("queued", "running"):
+                return task
+        return self._new_task(job_id, 1, "image", "rebuild", sync_jianying=sync)
 
     def rebuild(self, job_id: str) -> dict:
         with self.lock:
@@ -620,9 +724,23 @@ class SceneEditor:
         folder = self._folder(job_id)
         job = self.manager.get(job_id)
         options = job["options"]
-        scenes = [Scene(**scene) for scene in self._scenes(folder)]
+        snapshot = tempfile.TemporaryDirectory(prefix="scene-rebuild-")
+        work = Path(snapshot.name)
+        with self.lock:
+            scenes = [Scene(**scene) for scene in self._scenes(folder)]
+            for index, scene in enumerate(scenes):
+                for layer in ("image", "background", "foreground"):
+                    original = getattr(scene, layer)
+                    if original and Path(original).is_file():
+                        target = work / f"{index}_{layer}.png"
+                        shutil.copy2(original, target)
+                        setattr(scene, layer, str(target))
+            srt = work / "subtitles.srt"
+            shutil.copy2(folder / "subtitles.srt", srt)
+            revision = (folder / "edits" / "needs_rebuild").read_text() if (folder / "edits" / "needs_rebuild").is_file() else ""
+            sync_revision = (folder / "edits" / "needs_sync").read_text() if (folder / "edits" / "needs_sync").is_file() else ""
+            sync = self.task(job_id, task_id).get("sync_jianying", False)
         audio = self.manager.resolve_audio(job["audio_id"])
-        srt = folder / "subtitles.srt"
         width, height, fps = int(options.get("width", 1280)), int(options.get("height", 720)), int(options.get("fps", 25))
         if options.get("upscale_x2"):
             width, height = width * 2, height * 2
@@ -640,35 +758,33 @@ class SceneEditor:
                 temporary = pointer.with_suffix(".txt.tmp")
                 temporary.write_text(str(draft) + "\n", encoding="utf-8")
                 temporary.replace(pointer)
+            if sync:
+                previous = Path(job["registered_draft"])
+                name = str(options.get("draft_name") or Path(job["audio_name"]).stem)
+                destination = register_draft(draft, previous.parent, name)
+                with self.manager.lock:
+                    self.manager.jobs[job_id]["registered_draft"] = str(destination)
+                    self.manager._persist(self.manager.jobs[job_id])
+            with self.lock:
+                for filename, expected in (("needs_rebuild", revision), ("needs_sync", sync_revision)):
+                    marker = folder / "edits" / filename
+                    if (filename != "needs_sync" or sync) and marker.is_file() and marker.read_text() == expected:
+                        marker.unlink()
         except Exception:
             pending.unlink(missing_ok=True)
-            if draft.is_dir():
+            pointer = folder / "jianying_draft_path.txt"
+            if draft.is_dir() and not (pointer.is_file() and pointer.read_text().strip() == str(draft)):
                 shutil.rmtree(draft)
             raise
+        finally:
+            snapshot.cleanup()
 
     def sync_jianying(self, job_id: str) -> dict:
         folder = self._folder(job_id)
         with self.lock:
             job = self.manager.get(job_id)
-            if not job.get("registered_draft"):
+            if not job.get("registered_draft") or job["options"].get("output") not in ("jianying", "both"):
                 raise ValueError("该项目尚未注册到剪映")
-            marker = folder / "edits" / "needs_sync"
-            if not marker.is_file():
+            if not (folder / "edits" / "needs_sync").is_file():
                 raise ValueError("没有待同步的剪映修改")
-            tasks_dir = folder / "edits" / "tasks"
-            rebuilds = [item for path in tasks_dir.glob("*.json")
-                        if (item := json.loads(path.read_text(encoding="utf-8"))).get("kind") == "rebuild"]
-            latest = max(rebuilds, key=lambda item: item.get("created", "")) if rebuilds else None
-            if latest is None or latest.get("status") != "completed":
-                raise ValueError("请等待剪映草稿重建成功后再同步")
-            source = Path((folder / "jianying_draft_path.txt").read_text(encoding="utf-8").strip())
-            if not source.resolve().is_relative_to(folder.resolve()) or not (source / "draft_content.json").is_file():
-                raise ValueError("请等待剪映草稿重建完成")
-            previous = Path(job["registered_draft"])
-            name = str(job["options"].get("draft_name") or Path(job["audio_name"]).stem)
-            destination = register_draft(source, previous.parent, name)
-            with self.manager.lock:
-                self.manager.jobs[job_id]["registered_draft"] = str(destination)
-                self.manager._persist(self.manager.jobs[job_id])
-            marker.unlink(missing_ok=True)
-            return {"registered_draft": str(destination)}
+            return self._queue_rebuild(job_id, sync=True)
