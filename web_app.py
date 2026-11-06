@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from jianying_register import register_draft, registration_status
 from drawthings_cli import list_models, upscaler_available
+from gpu_thermal import AppleSMCGPU, DEFAULT_GPU_LIMIT, POLL_SECONDS
 from scene_motion import (PARALLAX_BACKGROUND_EFFECTS, PARALLAX_FOREGROUND_EFFECTS, PARALLAX_PLACEMENTS,
                           normalize_effects, parse_scene_numbers)
 from scene_editor import SceneEditor
@@ -57,6 +59,8 @@ class JobManager:
         self.lock = threading.Lock()
         self.jobs: dict[str, dict] = {}
         self.processes: dict[str, subprocess.Popen] = {}
+        self.thermal: dict[str, dict] = {}
+        self.shutting_down = False
         for metadata in self.runs.glob("*/job.json"):
             try:
                 state = json.loads(metadata.read_text(encoding="utf-8"))
@@ -112,6 +116,10 @@ class JobManager:
         if width % 2 or height % 2:
             raise ValueError("宽高必须是偶数")
         fps = number("fps", 25, 1, 60, True)
+        thermal_enabled = data.get("thermal_enabled", True)
+        if not isinstance(thermal_enabled, bool):
+            raise ValueError("GPU 热保护须为勾选状态")
+        thermal_limit = number("thermal_limit", DEFAULT_GPU_LIMIT, 1, 150) if thermal_enabled else DEFAULT_GPU_LIMIT
         scene_seconds = number("scene_seconds", 25, 1, 600)
         image_steps = data.get("image_steps")
         if image_steps not in (None, ""):
@@ -225,6 +233,7 @@ class JobManager:
         if key:
             env["LLM_API_KEY"] = key
         public_options = {k: v for k, v in data.items() if k != "llm_api_key"}
+        public_options.update(thermal_enabled=thermal_enabled, thermal_limit=thermal_limit)
         return command, env, {"audio_id": audio_id, "audio_name": audio.name, "options": public_options}
 
     def _persist(self, job: dict) -> None:
@@ -244,6 +253,52 @@ class JobManager:
         threading.Thread(target=self._run, args=(job_id, command, env), daemon=True).start()
         return self.get(job_id)
 
+    def _watch_gpu(self, job_id: str, process: subprocess.Popen, limit: float,
+                   done: threading.Event, pause_clock: Path) -> None:
+        try:
+            reader = AppleSMCGPU()
+        except (OSError, AttributeError):
+            with self.lock:
+                self.thermal[job_id] = {"status": "unavailable", "limit": limit}
+            return
+        paused_at = None
+        paused_seconds = 0.0
+        try:
+            while not done.is_set():
+                temperature = reader.read()
+                with self.lock:
+                    if self.shutting_down or self.jobs.get(job_id, {}).get("status") != "running" or process.poll() is not None:
+                        return
+                    try:
+                        if temperature is not None and temperature > limit and paused_at is None:
+                            os.killpg(process.pid, signal.SIGSTOP)
+                            paused_at = time.monotonic()
+                        elif temperature is not None and temperature < limit and paused_at is not None:
+                            paused_seconds += time.monotonic() - paused_at
+                            try:
+                                pause_clock.write_text(str(paused_seconds), encoding="utf-8")
+                            except OSError:
+                                pass
+                            os.killpg(process.pid, signal.SIGCONT)
+                            paused_at = None
+                    except ProcessLookupError:
+                        return
+                    status = "paused" if paused_at is not None else "monitoring" if temperature is not None else "unavailable"
+                    self.thermal[job_id] = {"status": status, "temperature": temperature, "limit": limit}
+                if done.wait(POLL_SECONDS):
+                    return
+        finally:
+            reader.close()
+
+    def _terminate_process(self, job_id: str, process: subprocess.Popen) -> None:
+        """Called under the manager lock so the watchdog cannot pause during cancellation."""
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            if self.thermal.get(job_id, {}).get("status") == "paused":
+                os.killpg(process.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+
     def _run(self, job_id: str, command: list[str], env: dict[str, str]) -> None:
         output = self.runs / job_id
         with self.lock:
@@ -251,25 +306,47 @@ class JobManager:
                 self.jobs[job_id].update(exit_code=-15, finished_at=now_iso())
                 self._persist(self.jobs[job_id])
                 return
+            options = self.jobs[job_id].get("options", {})
+        thermal_enabled = options.get("thermal_enabled", True)
+        pause_clock = output / ".gpu-pause-seconds"
+        if thermal_enabled:
+            env = {**env, "WAV_GPU_PAUSE_CLOCK": str(pause_clock)}
         try:
             with subprocess.Popen(command, cwd=SCRIPT_DIR, env=env, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True) as process:
                 with self.lock:
                     self.processes[job_id] = process
                     cancelled = self.jobs[job_id]["status"] == "cancelled"
-                if cancelled:
-                    os.killpg(process.pid, signal.SIGTERM)
-                with (output / "run.log").open("w", encoding="utf-8") as log:
-                    for line in process.stdout:
-                        log.write(line)
-                        log.flush()
-                exit_code = process.wait()
+                    if cancelled:
+                        self._terminate_process(job_id, process)
+                done = threading.Event()
+                watcher = None
+                if thermal_enabled and not cancelled:
+                    watcher = threading.Thread(target=self._watch_gpu,
+                                               args=(job_id, process, options.get("thermal_limit", DEFAULT_GPU_LIMIT), done, pause_clock),
+                                               daemon=True)
+                    watcher.start()
+                try:
+                    with (output / "run.log").open("w", encoding="utf-8") as log:
+                        for line in process.stdout:
+                            log.write(line)
+                            log.flush()
+                    exit_code = process.wait()
+                except BaseException:
+                    with self.lock:
+                        self._terminate_process(job_id, process)
+                    raise
+                finally:
+                    done.set()
+                    if watcher is not None:
+                        watcher.join()
             status = "completed" if exit_code == 0 else "failed"
         except Exception as exc:
             (output / "run.log").write_text(f"启动失败：{exc}\n", encoding="utf-8")
             exit_code, status = 1, "failed"
         with self.lock:
             self.processes.pop(job_id, None)
+            self.thermal.pop(job_id, None)
             state = self.jobs[job_id]
             if state["status"] == "cancelled":
                 status = "cancelled"
@@ -285,12 +362,15 @@ class JobManager:
             if job_id not in self.jobs:
                 raise KeyError(job_id)
             state = dict(self.jobs[job_id])
+            if state["status"] == "running" and job_id in self.thermal:
+                state["thermal"] = self.thermal[job_id].copy()
         output = self.runs / job_id
         if not output.is_dir():
             raise KeyError(job_id)
         state["output_dir"] = str(output)
         try:
-            state["files"] = sorted(p.name for p in output.iterdir() if p.is_file() and p.name not in ("job.json", "progress.json", "progress.json.tmp"))
+            state["files"] = sorted(p.name for p in output.iterdir() if p.is_file()
+                                    and p.name not in ("job.json", "progress.json", "progress.json.tmp", ".gpu-pause-seconds"))
         except FileNotFoundError as exc:
             raise KeyError(job_id) from exc
         log = output / "run.log"
@@ -324,11 +404,8 @@ class JobManager:
             self.jobs[job_id]["status"] = "cancelled"
             process = self.processes.get(job_id)
             self._persist(self.jobs[job_id])
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            if process is not None:
+                self._terminate_process(job_id, process)
         return self.get(job_id)
 
     def delete(self, job_id: str) -> None:
@@ -838,8 +915,21 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     app = create_app()
+    manager = app.extensions["job_manager"]
+
+    def stop_server(signum, frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_server)
     print(f"打开 http://127.0.0.1:{args.port}", flush=True)
-    app.run(host="127.0.0.1", port=args.port, debug=False, use_reloader=False, threaded=True)
+    try:
+        app.run(host="127.0.0.1", port=args.port, debug=False, use_reloader=False, threaded=True)
+    finally:
+        with manager.lock:
+            manager.shutting_down = True
+            for job_id, process in manager.processes.items():
+                if manager.thermal.get(job_id, {}).get("status") == "paused":
+                    manager._terminate_process(job_id, process)
 
 
 if __name__ == "__main__":

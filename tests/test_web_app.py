@@ -1,12 +1,13 @@
 import io
 import json
+import signal
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from web_app import JobManager, create_app
 
@@ -283,6 +284,24 @@ class WebAppTests(unittest.TestCase):
         with patch("web_app.subprocess.Popen", side_effect=AssertionError("worker launched after cancellation")) as popen:
             manager._run(job_id, ["python", "audio_video.py"], {})
             popen.assert_not_called()
+
+    def test_gpu_guard_waits_for_a_valid_reading_below_threshold(self):
+        manager = self.app.extensions["job_manager"]
+        manager.jobs["hot"] = {"status": "running"}
+        process = Mock(pid=1001)
+        process.poll.return_value = None
+        done = Mock()
+        done.is_set.return_value = False
+        done.wait.side_effect = [False, False, False, False, True]
+        reader = Mock()
+        reader.read.side_effect = [98, 99, None, 98, 97]
+        pause_clock = self.root / ".gpu-pause-seconds"
+        with patch("web_app.AppleSMCGPU", return_value=reader), patch("web_app.os.killpg") as send:
+            manager._watch_gpu("hot", process, 98, done, pause_clock)
+        self.assertEqual(send.call_args_list, [call(1001, signal.SIGSTOP), call(1001, signal.SIGCONT)])
+        self.assertEqual(manager.thermal["hot"]["status"], "monitoring")
+        self.assertGreaterEqual(float(pause_clock.read_text()), 0)
+        reader.close.assert_called_once()
 
     def test_deleted_job_directory_is_not_returned_as_html_500(self):
         manager = self.app.extensions["job_manager"]

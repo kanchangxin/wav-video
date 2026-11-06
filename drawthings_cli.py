@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +20,16 @@ DEFAULT_CLI = Path(__file__).resolve().parent / "tools" / "drawthings" / "draw-t
 LOCK_PATH = Path(tempfile.gettempdir()) / "wav-video-drawthings.lock"
 X2_UPSCALER = "realesrgan_x2plus_f16.ckpt"
 X2_CONFIG = {"upscaler": X2_UPSCALER, "upscalerScaleFactor": 2}
+
+
+def _thermal_pause_seconds() -> float:
+    clock = os.environ.get("WAV_GPU_PAUSE_CLOCK")
+    if clock:
+        try:
+            return float(Path(clock).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return 0.0
 
 
 def upscaler_available() -> bool:
@@ -120,10 +131,20 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
             try:
                 with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                       text=True, bufsize=1) as process:
+                    finished = threading.Event()
+                    started_at = time.monotonic()
+                    initial_pause = _thermal_pause_seconds()
                     def stop() -> None:
-                        timed_out.set()
-                        process.kill()
-                    timer = threading.Timer(1800, stop)
+                        remaining = 1800.0
+                        while not finished.wait(remaining):
+                            cooling = max(0, _thermal_pause_seconds() - initial_pause)
+                            remaining = 1800 - (time.monotonic() - started_at - cooling)
+                            if remaining <= 0:
+                                if process.poll() is None:
+                                    timed_out.set()
+                                    process.kill()
+                                return
+                    timer = threading.Thread(target=stop, daemon=True)
                     timer.start()
                     try:
                         for line in process.stdout:
@@ -137,7 +158,7 @@ def generate_image(prompt: str, path: Path, model: str, width: int, height: int,
                                     progress(current)
                         exit_code = process.wait()
                     finally:
-                        timer.cancel()
+                        finished.set()
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     finally:

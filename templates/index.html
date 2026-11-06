@@ -107,6 +107,12 @@
             <div id="llm-fields" class="subtle hidden"><label for="llm-base-url">LLM API 地址</label><input id="llm-base-url" value="http://127.0.0.1:1234/v1"><div class="row"><div><label for="llm-model">模型名称</label><input id="llm-model" placeholder="例如 qwen3"></div><div><label for="llm-api-key">API Key（可选）</label><input id="llm-api-key" type="password" autocomplete="off"></div></div><label for="visual-style">全局画面设定（可选）</label><textarea id="visual-style" placeholder="例如：\n时代：北魏\n地点：邺城与北方战场\n气氛：苍凉、肃杀、史诗感\n画风：电影级历史写实，低饱和冷灰色\n镜头：远景与人物特写结合"></textarea><p class="hint">这些设定会加入语义分段及自动运镜的提示词，留空则由模型自行判断。</p></div>
             <div id="draw-fields" class="subtle hidden"><div class="row"><div><label for="drawthings-model">场景生图模型（本机已下载）</label><div class="inline"><select id="drawthings-model"><option value="">正在读取模型…</option></select><button id="refresh-models" class="ghost" type="button">刷新</button></div></div><div><label for="image-steps">生图步数（可选）</label><input id="image-steps" type="number" min="1" max="150" placeholder="模型推荐值"></div></div><label for="character-profile-id">角色基准图（可选）</label><div class="inline"><select id="character-profile-id"><option value="">不使用角色档案</option></select><a class="ghost" href="/characters" target="_blank" rel="noopener" style="text-decoration:none;white-space:nowrap">配置基准图</a><button id="refresh-characters" class="ghost" type="button">刷新</button></div><p id="character-status" class="hint">系统自动判断主角是否出镜；固定分段且没有配置大模型时默认不出镜，可在完成后编辑场景。</p><div class="row"><div><label for="image-seed">固定 seed</label><input id="image-seed" type="number" min="0" max="4294967295" value="271829"></div></div><label for="image-prompt-suffix">生图提示词固定后缀（可选）</label><textarea id="image-prompt-suffix" placeholder="例如：historical cinematic realism, natural skin texture, no text, no watermark"></textarea><label class="toggle"><input id="upscale-x2" type="checkbox">使用 Real-ESRGAN X2+ 放大</label><p class="hint">勾选后，下面的宽高是基础生图尺寸；图片、MP4 和剪映画布扩大 2 倍。例如输入 640×384，输出为 1280×768。运镜场景可能生成更大的原图。需要本机已下载 X2+ 模型。</p><p id="drawthings-status" class="hint">通过本机 Draw Things CLI 生图，不需要开启 HTTP 服务。</p></div>
             <div id="draft-fields" class="subtle hidden"><label for="jianying-drafts-dir">剪映草稿根目录（可选）</label><input id="jianying-drafts-dir" placeholder="留空自动读取剪映设置"><label for="draft-name">草稿名称（可选）</label><input id="draft-name" placeholder="默认使用音频文件名"><label class="toggle"><input id="register-jianying" type="checkbox">生成后注册到剪映首页</label><p id="jianying-status" class="hint">正在检测剪映…</p></div>
+            <div class="subtle">
+              <label class="toggle"><input id="thermal-enabled" type="checkbox" checked>启用 GPU 热保护</label>
+              <label for="thermal-limit">暂停温度（°C）</label>
+              <input id="thermal-limit" type="number" min="1" max="150" step="any" value="98" required>
+              <p class="hint">GPU 温度高于阈值时暂停当前任务，降到阈值以下后自动继续。</p>
+            </div>
             <div class="row three"><div><label for="width">宽度</label><input id="width" type="number" min="160" max="4096" step="2" value="768"></div><div><label for="height">高度</label><input id="height" type="number" min="160" max="4096" step="2" value="512"></div><div><label for="fps">帧率</label><input id="fps" type="number" min="1" max="60" value="25"></div></div>
           </div>
         </form>
@@ -126,7 +132,7 @@
     function parallaxEffects(layer) {
       return Object.fromEntries(layerEffectKeys.map(key => [key, $(`parallax-${layer}-${key}`).value]));
     }
-    const configIds=['audio-id','whisper-model','language','quick-test','max-seconds','transcript-json','scene-mode','scene-seconds','motion-preset','parallax-placement','parallax-scenes',...Array.from(document.querySelectorAll('#parallax-layer-effects select'), select => select.id),'effect-fade','effect-horizontal','effect-vertical','effect-zoom','generate-images','llm-base-url','llm-model','visual-style','drawthings-model','image-steps','character-profile-id','image-seed','upscale-x2','image-prompt-suffix','jianying-drafts-dir','draft-name','register-jianying','width','height','fps'];
+    const configIds=['audio-id','whisper-model','language','quick-test','max-seconds','transcript-json','scene-mode','scene-seconds','motion-preset','parallax-placement','parallax-scenes',...Array.from(document.querySelectorAll('#parallax-layer-effects select'), select => select.id),'effect-fade','effect-horizontal','effect-vertical','effect-zoom','generate-images','llm-base-url','llm-model','visual-style','drawthings-model','image-steps','character-profile-id','image-seed','upscale-x2','image-prompt-suffix','jianying-drafts-dir','draft-name','register-jianying','thermal-enabled','thermal-limit','width','height','fps'];
     let savedConfig=null;
     try{const parsed=JSON.parse(localStorage.getItem(configKey));if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))savedConfig=parsed}catch{}
     function saveConfig(){if(!configReady)return;const values={output:selectedOutput()};for(const id of configIds){const control=$(id);values[id]=control.type==='checkbox'?control.checked:control.value}try{localStorage.setItem(configKey,JSON.stringify(values))}catch{}}
@@ -191,7 +197,7 @@
       }
       $('parallax-hint').textContent = hint;
     }
-    function updateFields() { const scene = $('scene-mode').value; $('scene-seconds-wrap').classList.toggle('hidden', scene !== 'fixed'); if (scene === 'none') { $('generate-images').checked = false; $('motion-preset').value = 'static'; } $('llm-fields').classList.toggle('hidden', scene !== 'llm' && $('motion-preset').value !== 'auto' && !(scene === 'fixed' && $('character-profile-id').value)); $('generate-images').disabled = scene === 'none'; $('motion-preset').disabled = scene === 'none'; for(const id of ['effect-fade','effect-horizontal','effect-vertical','effect-zoom'])$(id).disabled=scene==='none'; $('draw-fields').classList.toggle('hidden', !$('generate-images').checked); $('draft-fields').classList.toggle('hidden', !['jianying','both'].includes(selectedOutput())); $('max-seconds').disabled = !$('quick-test').checked; updateParallaxFields(); }
+    function updateFields() { const scene = $('scene-mode').value; $('scene-seconds-wrap').classList.toggle('hidden', scene !== 'fixed'); if (scene === 'none') { $('generate-images').checked = false; $('motion-preset').value = 'static'; } $('llm-fields').classList.toggle('hidden', scene !== 'llm' && $('motion-preset').value !== 'auto' && !(scene === 'fixed' && $('character-profile-id').value)); $('generate-images').disabled = scene === 'none'; $('motion-preset').disabled = scene === 'none'; for(const id of ['effect-fade','effect-horizontal','effect-vertical','effect-zoom'])$(id).disabled=scene==='none'; $('draw-fields').classList.toggle('hidden', !$('generate-images').checked); $('draft-fields').classList.toggle('hidden', !['jianying','both'].includes(selectedOutput())); $('max-seconds').disabled = !$('quick-test').checked; $('thermal-limit').disabled = !$('thermal-enabled').checked; updateParallaxFields(); }
     async function loadAudio(selectId) { const data = await api('/api/audio'); const select = $('audio-id'); const old = selectId || select.value; select.replaceChildren(); for (const file of data.files) { const o = document.createElement('option'); o.value = file.id; o.textContent = file.name; select.append(o); } if (old && [...select.options].some(o => o.value === old)) select.value = old; if (!data.files.length) { const o = document.createElement('option'); o.textContent = '请先上传音频'; o.value = ''; select.append(o); } }
     function fileUrl(jobId, name) { return `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`; }
     function renderHistory() {
@@ -203,7 +209,7 @@
         const title = document.createElement('strong'); title.textContent = job.audio_name;
         const sub = document.createElement('span');
         const progress = job.progress || {};
-        sub.textContent = job.status === 'running' ? `${progress.stage || '处理中'}${Number.isFinite(progress.percent) ? ` ${progress.percent}%` : ''}` : `${jobStatusText[job.status] || job.status} · ${job.created_at.slice(0,16).replace('T',' ')}`;
+        sub.textContent = job.thermal?.status === 'paused' ? '热保护暂停，等待降温' : job.status === 'running' ? `${progress.stage || '处理中'}${Number.isFinite(progress.percent) ? ` ${progress.percent}%` : ''}` : `${jobStatusText[job.status] || job.status} · ${job.created_at.slice(0,16).replace('T',' ')}`;
         b.append(title, sub); b.onclick = () => { activeJob = job.id; renderHistory(); showJob(job); }; row.append(b);
         if (job.status !== 'running') {
           const del = document.createElement('button'); del.type = 'button'; del.className = 'delete-job'; del.textContent = '删除'; del.title = '删除任务及本地输出文件';
@@ -222,7 +228,7 @@
       catch (e) { error(e.message); }
     }
     function el(tag, className, text) { const x=document.createElement(tag); if(className)x.className=className; if(text!==undefined)x.textContent=text; return x; }
-    function jobViewKey(job) { return JSON.stringify([job.id,job.status,job.progress,job.files,job.log,job.registered_draft]); }
+    function jobViewKey(job) { return JSON.stringify([job.id,job.status,job.progress,job.thermal,job.files,job.log,job.registered_draft]); }
     async function showJob(job) {
       if (job.id !== activeJob) return;
       renderedKey = jobViewKey(job);
@@ -240,7 +246,16 @@
         const info=job.progress || {}, progressBox=el('div','progress-box');
         const label=el('div','progress-label'); label.append(el('span','',info.stage || '处理中'),el('span','',Number.isFinite(info.percent) ? `${info.percent}%` : '请稍候'));
         const bar=document.createElement('progress'); bar.max=100; if(Number.isFinite(info.percent)) bar.value=info.percent;
-        progressBox.append(label,bar); detail.append(progressBox);
+        progressBox.append(label,bar);
+        if (job.thermal) {
+          const {status, temperature, limit} = job.thermal;
+          const reading = Number.isFinite(temperature) ? `GPU ${temperature.toFixed(1)} °C` : 'GPU 温度暂不可读';
+          const text = status === 'paused' ? `热保护已暂停 · ${reading}，等待低于 ${limit} °C`
+            : status === 'unavailable' ? 'GPU 温度暂不可读，当前无法执行热保护。'
+            : `${reading} · 热保护阈值 ${limit} °C`;
+          progressBox.append(el('p','hint',text));
+        }
+        detail.append(progressBox);
         const cancel=el('button','cancel','取消任务'); cancel.onclick=async()=>{try{await api(`/api/jobs/${job.id}/cancel`,{method:'POST'});await refreshJobs();}catch(e){error(e.message)}}; detail.append(cancel);
       }
       if(job.registered_draft){
@@ -280,11 +295,11 @@
       }catch(e){$('upload-label').textContent='上传失败';error(e.message);}
       finally{$('upload-progress').classList.add('hidden');}
     };
-    for(const id of ['scene-mode','motion-preset','parallax-placement','generate-images','quick-test'])$(id).addEventListener('change',updateFields);
+    for(const id of ['scene-mode','motion-preset','parallax-placement','generate-images','quick-test','thermal-enabled'])$(id).addEventListener('change',updateFields);
     document.querySelectorAll('input[name="output"]').forEach(x=>x.addEventListener('change',updateFields));
     $('job-form').addEventListener('input',saveConfig);$('job-form').addEventListener('change',saveConfig);
     $('reset-config').onclick=async()=>{configReady=false;savedConfig=null;try{localStorage.removeItem(configKey)}catch{}$('job-form').reset();$('audio-id').value='';$('drawthings-model').value='';$('character-profile-id').value='';$('llm-api-key').value='';updateFields();await Promise.all([loadAudio(),loadModels(true),loadCharacters()]);await checkJianying();configReady=true;error('');};
-    $('job-form').onsubmit=async event=>{event.preventDefault();error('');const data={audio_id:$('audio-id').value,output:selectedOutput(),scene_mode:$('scene-mode').value,scene_seconds:$('scene-seconds').value,motion_preset:$('motion-preset').value,parallax_placement:$('parallax-placement').disabled?'none':$('parallax-placement').value,parallax_scenes:$('parallax-scenes').disabled?'':$('parallax-scenes').value,parallax_background_effects:parallaxEffects('background'),parallax_foreground_effects:parallaxEffects('foreground'),motion_effects:{fade:$('effect-fade').value,horizontal:$('effect-horizontal').value,vertical:$('effect-vertical').value,zoom:$('effect-zoom').value},whisper_model:$('whisper-model').value,language:$('language').value,transcript_json:$('transcript-json').value.trim(),max_seconds:$('quick-test').checked?$('max-seconds').value:null,generate_images:$('generate-images').checked,llm_base_url:$('llm-base-url').value.trim(),llm_model:$('llm-model').value.trim(),llm_api_key:$('llm-api-key').value,visual_style:$('visual-style').value.trim(),drawthings_model:$('drawthings-model').value.trim(),image_steps:$('image-steps').value,image_seed:$('image-seed').value,upscale_x2:$('upscale-x2').checked,image_prompt_suffix:$('image-prompt-suffix').value.trim(),character_profile_id:$('character-profile-id').value,jianying_drafts_dir:$('jianying-drafts-dir').value.trim(),draft_name:$('draft-name').value.trim(),register_jianying:$('register-jianying').checked,width:$('width').value,height:$('height').value,fps:$('fps').value};$('start').disabled=true;try{const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});activeJob=job.id;$('llm-api-key').value='';await refreshJobs();}catch(e){error(e.message);}finally{$('start').disabled=false;}};
+    $('job-form').onsubmit=async event=>{event.preventDefault();error('');const data={audio_id:$('audio-id').value,output:selectedOutput(),scene_mode:$('scene-mode').value,scene_seconds:$('scene-seconds').value,motion_preset:$('motion-preset').value,parallax_placement:$('parallax-placement').disabled?'none':$('parallax-placement').value,parallax_scenes:$('parallax-scenes').disabled?'':$('parallax-scenes').value,parallax_background_effects:parallaxEffects('background'),parallax_foreground_effects:parallaxEffects('foreground'),motion_effects:{fade:$('effect-fade').value,horizontal:$('effect-horizontal').value,vertical:$('effect-vertical').value,zoom:$('effect-zoom').value},whisper_model:$('whisper-model').value,language:$('language').value,transcript_json:$('transcript-json').value.trim(),max_seconds:$('quick-test').checked?$('max-seconds').value:null,generate_images:$('generate-images').checked,llm_base_url:$('llm-base-url').value.trim(),llm_model:$('llm-model').value.trim(),llm_api_key:$('llm-api-key').value,visual_style:$('visual-style').value.trim(),drawthings_model:$('drawthings-model').value.trim(),image_steps:$('image-steps').value,image_seed:$('image-seed').value,upscale_x2:$('upscale-x2').checked,image_prompt_suffix:$('image-prompt-suffix').value.trim(),character_profile_id:$('character-profile-id').value,jianying_drafts_dir:$('jianying-drafts-dir').value.trim(),draft_name:$('draft-name').value.trim(),register_jianying:$('register-jianying').checked,thermal_enabled:$('thermal-enabled').checked,thermal_limit:$('thermal-limit').value,width:$('width').value,height:$('height').value,fps:$('fps').value};$('start').disabled=true;try{const job=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});activeJob=job.id;$('llm-api-key').value='';await refreshJobs();}catch(e){error(e.message);}finally{$('start').disabled=false;}};
     restoreConfig();updateFields();checkJianying();Promise.all([loadAudio(savedConfig?.['audio-id']),loadModels(false,savedConfig?.['drawthings-model']),loadCharacters(savedConfig?.['character-profile-id'])]).then(()=>{configReady=true}).catch(e=>error(e.message));refreshJobs();setInterval(refreshJobs,2500);
   </script>
 </body>
