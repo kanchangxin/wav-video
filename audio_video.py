@@ -58,10 +58,7 @@ def compose_scene_prompt(prompt: str, suffix: str, character_name: str,
                          character_present: bool, has_references: bool) -> str:
     parts = [prompt.strip()]
     if character_present and has_references:
-        parts.append(f"Use image 1 as the identity reference for {character_name}. "
-                     "Create the same person with the same face, facial structure, hair, age and distinguishing "
-                     "features in this scene. Change pose and surroundings as the scene requires. "
-                     "Do not copy the reference photo's studio background.")
+        parts.append(f"【人物参考】Use image 1 as the character identity reference.")
     if suffix.strip():
         parts.append(suffix.strip())
     return "\n".join(part for part in parts if part)
@@ -379,11 +376,30 @@ def analyze_scenes(captions: list[Caption], duration: float, base_url: str, mode
         style = visual_style.strip()
         style_block = f"全局画面设定（所有场景都必须遵循）：\n{style}\n" if style else ""
         character_block = (f"故事主角是「{protagonist_name}」。每个场景增加 character_present 布尔值，"
-                           "只有主角确实出镜时才填 true；空镜、其他人物和主角未出镜时填 false。\n") if protagonist_name else ""
-        instruction = (style_block + character_block + "把旁白字幕按画面场景切成连续片段，每段建议 15–40 秒。只返回 JSON："
+                           "只有主角不得不出镜时才填 true；\n") if protagonist_name else ""
+        instruction = (style_block + character_block + "把旁白字幕按画面场景切成连续片段，每段建议 3–7 秒。只返回 JSON："
                        '{"scenes":[{"start_index":0,"end_index":3,"prompt":"English visual prompt","character_present":false}]}。'
                        "索引从 0 开始，每条字幕必须恰好出现一次，区间连续，第一段从 0 开始，最后一段结束于最后索引。"
-                       "prompt 描述可生成的画面，不要包含文字或字幕。")
+                       "prompt 按照下面格式，给出绘画提示词， 语言精炼（"+
+    """
+【风格】
+中国古代魏晋南北朝时期，写实人物比例的 2D 游戏叙事插画，半厚涂技法，戏剧性电影光影，高细节。高清画质。
+【画面内容】
+场景：【地点、时间、环境】。
+主角：【动作、姿势、表情、视线、服装】。
+其他人物：【数量、位置、行为】。
+关键道具：【物品与空间关系】。
+叙事重点：【通过具体视觉细节体现的剧情情绪，3个词概括】。
+【镜头构图】
+景别：【远景 / 全景 / 中景 / 近景 / 特写】。
+机位：【正面 / 侧面 / 3/4侧面 / 背面】。
+镜头高度：【平视 / 低机位 / 俯视】。
+构图：【主体位置、前后景关系】。
+【光影情绪】
+光线：【时间、光源、光线方向、色调】。
+氛围：【核心情绪，以及通过人物与环境表现的具体细节】。
+    """
+ +" ）")
         payload = {"model": model, "temperature": 0.2, "messages": [
             {"role": "system", "content": instruction},
             {"role": "user", "content": json.dumps(entries, ensure_ascii=False)},

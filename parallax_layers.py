@@ -32,7 +32,7 @@ def background_prompt() -> str:
 
 
 def foreground_prompt() -> str:
-    return "把image1 背景透明"
+    return "把image1 背景透明 只保留人物和人物直接相关的东西，去除环境，去除景物"
 
 
 def apply_foreground_mask(source: Path, ai_foreground: Path, output: Path) -> None:
